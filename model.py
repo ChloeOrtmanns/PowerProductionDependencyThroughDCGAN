@@ -1,71 +1,132 @@
+# ---RANDOM-NOTES--------------------------------------------------------------------------------------------------------------
+# 1. Load data
+# 2. Split into train/test
+# 3. Compute stats on train ONLY
+# 4. Pass stats into dataset
+
 # ---IMPORTS-------------------------------------------------------------------------------------------------------------------
 from pathlib import Path
 import xarray as xr
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Subset
+
+statsPath = Path("Data/Processed/stats.pt")
+splitsPath = Path("Data/Processed/splits.pt")
+
 
 print(f"Using Pytorch {torch.__version__}.")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device {device}.")
-
-# ---RANDOM-FUNCTIONS----------------------------------------------------------------------------------------------------------
-def createListOfPaths(folderPath):
-    folder = Path(folderPath)
-    filePaths = [p for p in folder.iterdir() if p.is_file()]
-    return filePaths
 
 # ---DATASET+LOADER------------------------------------------------------------------------------------------------------------
 # ---NORMALIZATION-------------------------------------------------------------------------------------------------------------
 # neural networks work best when inputs are roughly: mean ~ 0, std ~1. That's why it's important to normalize. If you wouldn't,
 # the model could prioritize larger-scale features = unstable/slow training = poorly behaving gradients. 
 # IMPORTANT to note is you should compute the stats on training data only and reuse same values for validation/test
-
 class EnergyDataset(Dataset):
-    def __init__(self, solar_paths, wind_paths):                      # Compute constants
-        self.ds_solar = xr.open_mfdataset(solar_paths, combine="by_coords")
-        self.ds_wind  = xr.open_mfdataset(wind_paths , combine="by_coords")
+    def __init__(self, solarPaths, windPaths, stats=None):                      # Compute constants
+        self.dsSolar = xr.open_mfdataset(solarPaths, combine="by_coords")
+        self.dsWind  = xr.open_mfdataset(windPaths , combine="by_coords")
 
         # Align datasets
-        self.ds_solar, self.ds_wind = xr.align(self.ds_solar, self.ds_wind)
+        self.dsSolar, self.dsWind = xr.align(self.dsSolar, self.dsWind)
 
-        self.solar = self.ds_solar["Solar Energy Potential"]   
-        self.wind = self.ds_wind["Wind Energy Potential"]
+        self.solar = self.dsSolar["Solar Energy Potential"]   
+        self.wind = self.dsWind["Wind Energy Potential"]
 
-        # Normalization init
-        self.solar_mean = self.solar.mean().compute().item()
-        self.solar_std = self.solar.std().compute().item()
-
-        self.wind_mean = self.wind.mean().compute().item()
-        self.wind_std = self.wind.std().compute().item()
+        self.stats = stats
 
     def __len__(self):
         return self.solar.sizes["time"]
 
     def __getitem__(self, idx):                                     # Apply transformation per sample
-        solar_sample = self.solar.isel(time=idx).values
-        wind_sample = self.wind.isel(time=idx).values
+        solarSample = self.solar.isel(time=idx).values
+        windSample = self.wind.isel(time=idx).values
 
         # Convert to tensors
-        solar_tensor = torch.tensor(solar_sample, dtype=torch.float32)
-        wind_tensor = torch.tensor(wind_sample, dtype=torch.float32)
+        solarTensor = torch.tensor(solarSample, dtype=torch.float32)
+        windTensor = torch.tensor(windSample, dtype=torch.float32)
 
-        # Normalization
-        solar_tensor = (solar_tensor - self.solar_mean) / self.solar_std
-        wind_tensor = (wind_tensor - self.wind_mean) / self.wind_std
+        if self.stats is not None:
+            solarTensor = (solarTensor - self.stats["solarMean"]) / self.stats["solarStd"]
+            windTensor  = (windTensor  - self.stats["windMean"])  / self.stats["windStd"]
 
         # Concatenate along channel dimension
-        x = torch.stack([solar_tensor, wind_tensor], dim=0)
+        x = torch.stack([solarTensor, windTensor], dim=0)
 
         return x
+    
+# ---FUNCTIONS-----------------------------------------------------------------------------------------------------------------    
+def savePathsLists():
+    solarPaths = list(Path("Data/Power/Solar").glob("*.nc"))
+    windPaths  = list(Path("Data/Power/Wind").glob("*.nc"))
 
-dataset = EnergyDataset(createListOfPaths('Data/Power/Solar')[0:2], createListOfPaths('Data/Power/Wind')[0:2])
+    torch.save({
+    "solarPaths": solarPaths,
+    "windPaths": windPaths
+}, "paths.pt")
+    
+def pathsLists():
+    paths = torch.load("paths.pt", weights_only=False)
+    return paths["solarPaths"], paths["windPaths"]
 
-loader = DataLoader(dataset, batch_size=32, shuffle=True)   # -> that means it'll group them by 32 in one batch, so 11x32+13=365 
+def calculateSaveStatsSplits():
+    solarPaths, windPaths = pathsLists()
+    fullDataset = EnergyDataset(
+        solarPaths,
+        windPaths,
+        stats=None
+    )
+    trainSize = int(0.8 * len(fullDataset))
+    trainIndices = list(range(0, trainSize))
+    testIndices  = list(range(trainSize, len(fullDataset)))
+    torch.save({
+        "train": trainIndices,
+        "test": testIndices
+        }, splitsPath)
 
-for batch in loader:
-    print(batch.shape)
+    solarMean = fullDataset.solar.isel(time=trainIndices).mean().compute().item()
+    solarStd  = fullDataset.solar.isel(time=trainIndices).std().compute().item()
+    windMean  = fullDataset.wind.isel(time=trainIndices).mean().compute().item()
+    windStd   = fullDataset.wind.isel(time=trainIndices).std().compute().item()
+    torch.save({
+        "solarMean": solarMean,
+        "solarStd": solarStd,
+        "windMean": windMean,
+        "windStd": windStd
+        }, statsPath)
 
-# -----------------------------------------------------------------------------------------------------------------------------
+
+def main():
+    # only run this function once
+    # savePathsLists()
+    # calculateSaveStatsSplits()
+
+    # ---NORMALIZED-DATASET--------------------------------------------------------------------------------------------------------
+    solarPaths, windPaths = pathsLists()
+    normalizedDs = EnergyDataset(
+        solarPaths,
+        windPaths,
+        torch.load(statsPath)
+    )
+
+    # ---DATASET-SPLITTING---------------------------------------------------------------------------------------------------------
+    
+    splits = torch.load(splitsPath)
+    trainIndices = splits["train"]
+    testIndices  = splits["test"]
+    
+    trainDataset = Subset(normalizedDs, trainIndices)
+    testDataset = Subset(normalizedDs, testIndices)
+
+    # ---LOADER--------------------------------------------------------------------------------------------------------------------
+    trainLoader = DataLoader(trainDataset, batch_size=32, shuffle=True)   # -> that means it'll group them by 32 in one batch, so 11x32+13=365 
+
+
+
+if __name__ == "__main__":
+    main()
 
 
 # latent_dim = 10  # latent dimension
