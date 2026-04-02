@@ -1,0 +1,2 @@
+# PowerProductionDependencyThroughDCGAN
+Bachelor Thesis Project
