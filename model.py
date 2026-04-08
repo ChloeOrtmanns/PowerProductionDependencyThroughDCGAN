@@ -18,7 +18,7 @@ statsPath = Path("Data/Processed/stats.pt")
 splitsPath = Path("Data/Processed/splits.pt")
 
 lat = 121
-long = 201
+lon = 201
 
 latentDim = 10      # latent dimension
 numEpochs = 3       # number of training epochs. You may increase it to gain better results but it will take more time.
@@ -30,6 +30,7 @@ ngf = 64            # 32 is trauning is unstable, 128 for more detail
 # |---------ngf ↑ → more capacity → better detail → harder training
 # |---------ngf ↓ → simpler model → more stable → less expressive
 nc = 2
+ndf = 64
 
 
 print(f"Using Pytorch {torch.__version__}.")
@@ -75,30 +76,41 @@ class EnergyDataset(Dataset):
         return x
 
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, ngpu):
         super(Discriminator, self).__init__()
 
         self.main = nn.Sequential(
-            # Convolution 1
-            nn.Conv2d(1, 64, kernel_size=5, stride=2, padding=2, bias=True),
-            nn.LeakyReLU(),
-            nn.Dropout2d(0.3),
+            # Input: (2, 121, 201)
 
-            # Convolution 2
-            nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2, bias=True),
-            nn.LeakyReLU(),
-            nn.Dropout2d(0.3),
+            nn.Conv2d(nc, ndf, kernel_size=4, stride=2, padding=1, bias=False),  # ~60x100
+            nn.LeakyReLU(0.2, inplace=True),
 
-            # Flatten and Linear layer
+            nn.Conv2d(ndf, ndf*2, kernel_size=4, stride=2, padding=1, bias=False),  # ~30x50
+            nn.BatchNorm2d(ndf*2),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(ndf*2, ndf*4, kernel_size=4, stride=2, padding=1, bias=False),  # ~15x25
+            nn.BatchNorm2d(ndf*4),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(ndf*4, ndf*8, kernel_size=4, stride=2, padding=1, bias=False),  # ~7x12
+            nn.BatchNorm2d(ndf*8),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Final collapse
+            nn.Conv2d(ndf*8, 1, kernel_size=7, stride=1, padding=0, bias=False),
+            # Output: (1, ~?, ~?)
+
             nn.Flatten(),
-            nn.Linear(128 * 7 * 7, 1, bias=True),
-
-            # Output layer
             nn.Sigmoid()
         )
 
-    def forward(self, input_tensor):
-        return self.main(input_tensor)
+    def forward(self, x, debug=False):
+        for i, layer in enumerate(self.main):
+            x = layer(x)
+            if debug:
+                print(f"Layer {i} ({type(layer).__name__}): {x.shape}")
+        return x
 
 # The generator is designed to map the latent space vector to data-space.
 class Generator(nn.Module):
@@ -138,7 +150,7 @@ class Generator(nn.Module):
             if debug:
                 print(f"Layer {i} ({type(layer).__name__}): {input_tensor.shape}")
         
-        input_tensor = F.interpolate(input_tensor, size=(lat,long), mode='bilinear', align_corners=False)
+        input_tensor = F.interpolate(input_tensor, size=(lat,lon), mode='bilinear', align_corners=False)
         if debug:
             print(f"After interpolation: {input_tensor.shape}")
 
@@ -220,8 +232,8 @@ def main():
 
     # ---LOADER--------------------------------------------------------------------------------------------------------------------
     
-    # trainLoader = DataLoader(trainDataset, batch_size=batchSize, shuffle=True)    
-    # testLoader = DataLoader(testDataset, batch_size=batchSize, shuffle=True)
+    trainLoader = DataLoader(trainDataset, batch_size=batchSize, shuffle=True)    
+    testLoader = DataLoader(testDataset, batch_size=batchSize, shuffle=True)
 
     # ---GENERATOR-----------------------------------------------------------------------------------------------------------------
     netG = Generator(ngpu).to(device)
@@ -233,18 +245,75 @@ def main():
     # Apply the weights_init function to randomly initialize all weights to mean=0, stdev=0.02.
     netG.apply(weights_init)
 
-    z = torch.randn(1, nz, 1, 1)  # batch_size=1
-    out = netG(z, debug=True)
+    # ---Testing---
+    # z = torch.randn(1, nz, 1, 1)  # batch_size=1
+    # out = netG(z, debug=True)
     # should be torch.Size([1, 2, 121, 201])
+
+    # ---DISCRIMINATOR------------------------------------------------------------------------------------------------------------
+    netD = Discriminator(ngpu).to(device)
+
+    if (device.type == 'cuda') and (ngpu > 1):
+        netD = nn.DataParallel(netD, list(range(ngpu)))
+
+    netD.apply(weights_init)
+
+    # ---Testing---
+    x = torch.randn(1, 2, 121, 201).to(device)
+    out = netD(x)
+
+    print(out.shape)
+
+    # # ---TRAININGLOOP-------------------------------------------------------------------------------------------------------------
+    # for epoch in range(numEpochs):
+    #     for i, realData in enumerate(trainLoader):
+
+    #         realData = realData.to(device)   # shape: [B, 2, 121, 201]
+    #         bSize = realData.size(0)
+
+    #         # Labels
+    #         real_labels = torch.ones(bsize, 1, device=device)
+    #         fake_labels = torch.zeros(bSize, 1, device=device)
+
+    #         # train
+    #         netD.zero_grad()
+
+    #         # Real data
+    #         output_real = netD(real_data).view(-1, 1)
+    #         loss_real = criterion(output_real, real_labels)
+
+    #         # Fake data
+    #         noise = torch.randn(b_size, nz, 1, 1, device=device)
+    #         fake_data = netG(noise)
+
+    #         output_fake = netD(fake_data.detach()).view(-1, 1)
+    #         loss_fake = criterion(output_fake, fake_labels)
+
+    #         # Total loss
+    #         loss_D = loss_real + loss_fake
+    #         loss_D.backward()
+    #         optimizerD.step()
+
+    #         # ====================================================
+    #         # 2️⃣ Train Generator
+    #         # ====================================================
+    #         netG.zero_grad()
+
+    #         output_fake = netD(fake_data).view(-1, 1)
+    #         loss_G = criterion(output_fake, real_labels)  # trick: wants D to think fake is real
+
+    #         loss_G.backward()
+    #         optimizerG.step()
+
+    #         # ====================================================
+    #         # Logging
+    #         # ====================================================
+    #         if i % 50 == 0:
+    #             print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
+    #                 f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
 
 
 if __name__ == "__main__":
     main()
 
-
-
-# # Example:
-# discriminator = Discriminator()
-# x = discriminator(torch.randn(batch_size, 1, 28, 28))
-# print(x.shape)  # torch.Size([batch_size, 1])
 
