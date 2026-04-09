@@ -13,17 +13,15 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
 
-import matplotlib.pyplot as plt
-
 # ---VARIABLES-----------------------------------------------------------------------------------------------------------------
-statsPath = Path("stats.pt")
-splitsPath = Path("splits.pt")
+statsPath = Path("Data/Processed/stats.pt")
+splitsPath = Path("Data/Processed/splits.pt")
 
 lat = 121
 lon = 201
 
 latentDim = 10      # latent dimension
-numEpochs = 10       # number of training epochs. You may increase it to gain better results but it will take more time.
+numEpochs = 3       # number of training epochs. You may increase it to gain better results but it will take more time.
 batchSize = 32      # -> that means it'll group them by 32 in one batch, so 11x32+13=365 for one year
 ngpu = 0
 nz = 100            # Size of z latent vector (underlying degrees of freedom)
@@ -32,7 +30,7 @@ ngf = 64            # 32 is trauning is unstable, 128 for more detail
 # |---------ngf ↑ → more capacity → better detail → harder training
 # |---------ngf ↓ → simpler model → more stable → less expressive
 nc = 2
-ndf = 32
+ndf = 64
 
 
 print(f"Using Pytorch {torch.__version__}.")
@@ -69,11 +67,8 @@ class EnergyDataset(Dataset):
         windTensor = torch.tensor(windSample, dtype=torch.float32)
 
         if self.stats is not None:
-            solarTensor = (solarTensor - self.stats["solarMin"]) / (self.stats["solarMax"] - self.stats["solarMin"])
-            solarTensor = solarTensor * 2 - 1  # → [-1, 1]
-
-            windTensor  = (windTensor  - self.stats["windMin"]) / (self.stats["windMax"] - self.stats["windMin"])
-            windTensor  = windTensor * 2 - 1  # → [-1, 1]
+            solarTensor = (solarTensor - self.stats["solarMean"]) / self.stats["solarStd"]
+            windTensor  = (windTensor  - self.stats["windMean"])  / self.stats["windStd"]
 
         # Concatenate along channel dimension
         x = torch.stack([solarTensor, windTensor], dim=0)
@@ -142,8 +137,7 @@ class Generator(nn.Module):
             nn.ReLU(True),
 
             # final layer → 
-            nn.ConvTranspose2d(ngf, nc, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.Tanh()
+            nn.ConvTranspose2d(ngf, nc, kernel_size=4, stride=2, padding=1, bias=False)
         )
 
     def forward(self, input_tensor, debug=False):
@@ -155,9 +149,7 @@ class Generator(nn.Module):
             if debug:
                 print(f"Layer {i} ({type(layer).__name__}): {input_tensor.shape}")
         
-        # input_tensor = F.interpolate(input_tensor, size=(lat,lon), mode='bilinear', align_corners=False)
-        input_tensor = F.interpolate(input_tensor, size=(lat, lon), mode='bilinear')
-        # input_tensor = input_tensor[:, :, :lat, :lon]
+        input_tensor = F.interpolate(input_tensor, size=(lat,lon), mode='bilinear', align_corners=False)
         if debug:
             print(f"After interpolation: {input_tensor.shape}")
 
@@ -177,8 +169,8 @@ def weights_init(m):
         nn.init.constant_(m.bias.data, 0)
 
 def savePathsLists():
-    solarPaths = list(Path("../../../mnt/mvbc-gan/Data/Power/Solar").glob("*.nc"))
-    windPaths  = list(Path("../../../mnt/mvbc-gan/Data/Power/Wind").glob("*.nc"))
+    solarPaths = list(Path("Data/Power/Solar").glob("*.nc"))
+    windPaths  = list(Path("Data/Power/Wind").glob("*.nc"))
 
     torch.save({
     "solarPaths": solarPaths,
@@ -204,67 +196,16 @@ def calculateSaveStatsSplits():
         "test": testIndices
         }, splitsPath)
 
-    solarMin = fullDataset.solar.isel(time=trainIndices).min().compute().item()
-    solarMax = fullDataset.solar.isel(time=trainIndices).max().compute().item()
-
-    windMin  = fullDataset.wind.isel(time=trainIndices).min().compute().item()
-    windMax  = fullDataset.wind.isel(time=trainIndices).max().compute().item()
-
+    solarMean = fullDataset.solar.isel(time=trainIndices).mean().compute().item()
+    solarStd  = fullDataset.solar.isel(time=trainIndices).std().compute().item()
+    windMean  = fullDataset.wind.isel(time=trainIndices).mean().compute().item()
+    windStd   = fullDataset.wind.isel(time=trainIndices).std().compute().item()
     torch.save({
-        "solarMin": solarMin,
-        "solarMax": solarMax,
-        "windMin": windMin,
-        "windMax": windMax
-    }, statsPath)
-
-def show_generated_samples(generator, stats, epoch, nz=100, device='cpu'):
-    generator.eval()  # set to eval mode for inference
-    with torch.no_grad():
-        noise = torch.randn(1, nz, 1, 1, device=device)  # generate 1 sample
-        fake = generator(noise)[0]  # remove batch dimension: [2, 121, 201]
-        
-        # If you normalized to [-1,1], rescale back to original range for plotting
-        fake_solar = (fake[0] + 1) / 2 * (stats["solarMax"] - stats["solarMin"]) + stats["solarMin"]
-        fake_wind  = (fake[1] + 1) / 2 * (stats["windMax"] - stats["windMin"]) + stats["windMin"]
-        
-        plt.figure(figsize=(10,4))
-        plt.subplot(1,2,1)
-        plt.title("Fake Solar")
-        plt.imshow(fake_solar.cpu(), cmap='viridis')
-        plt.colorbar()
-        
-        plt.subplot(1,2,2)
-        plt.title("Fake Wind")
-        plt.imshow(fake_wind.cpu(), cmap='viridis')
-        plt.colorbar()
-        
-        plt.savefig(f"epoch_{epoch}_sample.png")
-        plt.close()
-    generator.train()  # back to training mode
-
-def show_real_sample(data_loader, stats, device='cpu'):
-    # Get one batch
-    real_batch = next(iter(data_loader))
-    real_sample = real_batch[0].to(device)  # pick first sample in batch, shape [2,121,201]
-
-    # Rescale back to original range if you normalized to [-1,1]
-    real_solar = (real_sample[0] + 1) / 2 * (stats["solarMax"] - stats["solarMin"]) + stats["solarMin"]
-    real_wind  = (real_sample[1] + 1) / 2 * (stats["windMax"] - stats["windMin"]) + stats["windMin"]
-
-    # Plot
-    plt.figure(figsize=(10,4))
-    plt.subplot(1,2,1)
-    plt.title("Real Solar")
-    plt.imshow(real_solar.cpu(), cmap='viridis')
-    plt.colorbar()
-
-    plt.subplot(1,2,2)
-    plt.title("Real Wind")
-    plt.imshow(real_wind.cpu(), cmap='viridis')
-    plt.colorbar()
-
-    plt.savefig(f"real_sample.png")
-    plt.close()
+        "solarMean": solarMean,
+        "solarStd": solarStd,
+        "windMean": windMean,
+        "windStd": windStd
+        }, statsPath)
 
 
 def main():
@@ -317,80 +258,58 @@ def main():
     netD.apply(weights_init)
 
     # ---Testing---
-    # x = torch.randn(1, 2, 121, 201).to(device)
-    # out = netD(x)
+    x = torch.randn(1, 2, 121, 201).to(device)
+    out = netD(x)
 
-    # print(out.shape)
+    print(out.shape)
 
-    # ---TRAININGLOOP-------------------------------------------------------------------------------------------------------------
-    show_real_sample(trainLoader, torch.load(statsPath), device)
-    
-    criterion = nn.BCELoss()
+    # # ---TRAININGLOOP-------------------------------------------------------------------------------------------------------------
+    # for epoch in range(numEpochs):
+    #     for i, realData in enumerate(trainLoader):
 
-    beta1 = 0.5
+    #         realData = realData.to(device)   # shape: [B, 2, 121, 201]
+    #         bSize = realData.size(0)
 
-    optimizerD = torch.optim.Adam(netD.parameters(), lr=0.00005, betas=(beta1, 0.999))
-    optimizerG = torch.optim.Adam(netG.parameters(), lr=0.0002, betas=(beta1, 0.999))
+    #         # Labels
+    #         real_labels = torch.ones(bsize, 1, device=device)
+    #         fake_labels = torch.zeros(bSize, 1, device=device)
 
-    for epoch in range(numEpochs):
-        for i, real_data in enumerate(trainLoader):
+    #         # train
+    #         netD.zero_grad()
 
-            real_data = real_data.to(device)   # [B, 2, 121, 201]
-            b_size = real_data.size(0)
+    #         # Real data
+    #         output_real = netD(real_data).view(-1, 1)
+    #         loss_real = criterion(output_real, real_labels)
 
-            # --- LABEL SMOOTHING ---
-            real_labels = torch.full((b_size, 1), 0.9, device=device)  # real=0.9 instead of 1
-            fake_labels = torch.full((b_size, 1), 0.0, device=device)  # fake=0
+    #         # Fake data
+    #         noise = torch.randn(b_size, nz, 1, 1, device=device)
+    #         fake_data = netG(noise)
 
-            # -------------------------------
-            # 1️⃣ Train Discriminator
-            # -------------------------------
-            netD.zero_grad()
+    #         output_fake = netD(fake_data.detach()).view(-1, 1)
+    #         loss_fake = criterion(output_fake, fake_labels)
 
-            # --- Add noise (decays over time) ---
-            noise_strength = max(0.1 * (1 - epoch / numEpochs), 0.01)
+    #         # Total loss
+    #         loss_D = loss_real + loss_fake
+    #         loss_D.backward()
+    #         optimizerD.step()
 
-            # Use the noisy data
-            real_data_noisy = real_data + noise_strength * torch.randn_like(real_data)
-            output_real = netD(real_data_noisy).view(-1, 1)
-            loss_real = criterion(output_real, real_labels)
+    #         # ====================================================
+    #         # 2️⃣ Train Generator
+    #         # ====================================================
+    #         netG.zero_grad()
 
-            # Fake data
-            noise = torch.randn(b_size, nz, 1, 1, device=device)
-            fake_data = netG(noise)
+    #         output_fake = netD(fake_data).view(-1, 1)
+    #         loss_G = criterion(output_fake, real_labels)  # trick: wants D to think fake is real
 
-            fake_data_noisy = fake_data.detach() + noise_strength * torch.randn_like(fake_data)
-            output_fake = netD(fake_data_noisy).view(-1, 1)
-            loss_fake = criterion(output_fake, fake_labels)
+    #         loss_G.backward()
+    #         optimizerG.step()
 
-            loss_D = loss_real + loss_fake
-            loss_D.backward()
-            optimizerD.step()
-
-            # -------------------------------
-            # 2️⃣ Train Generator (twice!)
-            # -------------------------------
-            for _ in range(2):  # train G more frequently
-                netG.zero_grad()
-
-                # Generate fake again to get fresh gradients
-                noise = torch.randn(b_size, nz, 1, 1, device=device)
-                fake_data = netG(noise)
-
-                output_fake = netD(fake_data).view(-1, 1)
-                loss_G = criterion(output_fake, real_labels)  # trick D to think fakes are real
-
-                loss_G.backward()
-                optimizerG.step()
-
-            # -------------------------------
-            # Logging
-            # -------------------------------
-            if i % 50 == 0:
-                print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
-                    f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
-
-        show_generated_samples(netG, torch.load(statsPath), epoch, nz=nz, device=device)
+    #         # ====================================================
+    #         # Logging
+    #         # ====================================================
+    #         if i % 50 == 0:
+    #             print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
+    #                 f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
 
 
 if __name__ == "__main__":
