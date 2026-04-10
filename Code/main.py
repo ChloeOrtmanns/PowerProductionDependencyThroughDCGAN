@@ -1,8 +1,5 @@
 # ---RANDOM-NOTES--------------------------------------------------------------------------------------------------------------
-# 1. Load data
-# 2. Split into train/test
-# 3. Compute stats on train ONLY
-# 4. Pass stats into dataset
+# Most of the code is based off https://docs.pytorch.org/tutorials/beginner/dcgan_faces_tutorial.html
 
 # ---IMPORTS-------------------------------------------------------------------------------------------------------------------
 from pathlib import Path
@@ -16,8 +13,9 @@ from torch.utils.data import Subset
 import matplotlib.pyplot as plt
 
 # ---VARIABLES-----------------------------------------------------------------------------------------------------------------
-statsPath = Path("stats.pt")
-splitsPath = Path("splits.pt")
+statsPath = Path("Resources\stats.pt")
+splitsPath = Path("Resources\splits.pt")
+pathsPath = Path("Resources\paths.pt")
 
 lat = 121
 lon = 201
@@ -183,10 +181,10 @@ def savePathsLists():
     torch.save({
     "solarPaths": solarPaths,
     "windPaths": windPaths
-}, "paths.pt")
+}, pathsPath)
     
 def pathsLists():
-    paths = torch.load("paths.pt", weights_only=False)
+    paths = torch.load(pathsPath, weights_only=False)
     return paths["solarPaths"], paths["windPaths"]
 
 def calculateSaveStatsSplits():
@@ -325,66 +323,72 @@ def main():
     # ---TRAININGLOOP-------------------------------------------------------------------------------------------------------------
     show_real_sample(trainLoader, torch.load(statsPath), device)
     
-    criterion = nn.BCELoss()
+    criterion = nn.BCELoss() # Binary Cross Entropy loss -> can be changed into WGAN
 
+    #  set up two separate optimizers. As specified in the DCGAN paper, both are Adam optimizers with learning rate 0.0002 and Beta1 = 0.5
     beta1 = 0.5
-
     optimizerD = torch.optim.Adam(netD.parameters(), lr=0.00005, betas=(beta1, 0.999))
     optimizerG = torch.optim.Adam(netG.parameters(), lr=0.0002, betas=(beta1, 0.999))
 
     for epoch in range(numEpochs):
         for i, real_data in enumerate(trainLoader):
 
+            # --- FORMAT BATCH ---
             real_data = real_data.to(device)   # [B, 2, 121, 201]
             b_size = real_data.size(0)
 
             # --- LABEL SMOOTHING ---
+            # Label smoothing is a regularization technique in deep learning that prevents models from becoming overconfident
+            # by replacing strict "hard" one-hot encoded targets (e.g., [0,0,1]) with "soft" target probabilities (e.g., [0.5,0.5,0.9]).
+            # It improves model generalization and reduces overfitting by encouraging smaller logit gaps, often enhancing test accuracy
             real_labels = torch.full((b_size, 1), 0.9, device=device)  # real=0.9 instead of 1
             fake_labels = torch.full((b_size, 1), 0.0, device=device)  # fake=0
 
-            # -------------------------------
-            # 1️⃣ Train Discriminator
-            # -------------------------------
+            # --- DISCRIMINATOR ---
             netD.zero_grad()
 
             # --- Add noise (decays over time) ---
             noise_strength = max(0.1 * (1 - epoch / numEpochs), 0.01)
 
-            # Use the noisy data
             real_data_noisy = real_data + noise_strength * torch.randn_like(real_data)
             output_real = netD(real_data_noisy).view(-1, 1)
+            # Calculate D's loss on real batch
             loss_real = criterion(output_real, real_labels)
 
-            # Fake data
+            # Generate batch of latent vectors
             noise = torch.randn(b_size, nz, 1, 1, device=device)
+            # Generate fake data batch with G
             fake_data = netG(noise)
 
             fake_data_noisy = fake_data.detach() + noise_strength * torch.randn_like(fake_data)
+            
             output_fake = netD(fake_data_noisy).view(-1, 1)
+            # Calculate D's loss on fake batch
             loss_fake = criterion(output_fake, fake_labels)
 
             loss_D = loss_real + loss_fake
+            # You can calculate gradients for D in backward pass
             loss_D.backward()
+            # Update D
             optimizerD.step()
 
-            # -------------------------------
-            # 2️⃣ Train Generator (twice!)
-            # -------------------------------
-            for _ in range(2):  # train G more frequently
+            # --- GENERATOR ---
+            for _ in range(3):  # train G more frequently
                 netG.zero_grad()
 
                 # Generate fake again to get fresh gradients
                 noise = torch.randn(b_size, nz, 1, 1, device=device)
                 fake_data = netG(noise)
 
+                # Perform a forward pass of all-fake batch through D
                 output_fake = netD(fake_data).view(-1, 1)
+                # Calculate G's loss
                 loss_G = criterion(output_fake, real_labels)  # trick D to think fakes are real
-
+                # Calculate gradients for G
                 loss_G.backward()
+                # Update G
                 optimizerG.step()
 
-            # -------------------------------
-            # Logging
             # -------------------------------
             if i % 50 == 0:
                 print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
