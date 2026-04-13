@@ -3,3 +3,4 @@ Data.zip
 paths.pt
 wandb_test.py
 wandb
+__pycache__
