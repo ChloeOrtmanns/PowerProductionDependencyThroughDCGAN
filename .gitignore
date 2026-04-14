@@ -3,5 +3,6 @@ Data.zip
 paths.pt
 wandb_test.py
 wandb
+Models/__pycache__
 __pycache__
 FakeData
