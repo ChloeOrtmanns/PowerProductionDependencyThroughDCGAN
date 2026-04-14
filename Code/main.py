@@ -305,8 +305,8 @@ def main():
     netD.apply(weights_init)
 
     # ---Testing---
-    x = torch.randn(1, 2, 121, 201).to(device)
-    out = netD(x, debug=True)
+    # x = torch.randn(1, 2, 121, 201).to(device)
+    # out = netD(x, debug=True)
 
     # print(out.shape)
 
