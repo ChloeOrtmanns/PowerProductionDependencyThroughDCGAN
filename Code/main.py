@@ -281,6 +281,18 @@ def main():
     trainLoader = DataLoader(trainDataset, batch_size=batchSize, shuffle=True)    
     testLoader = DataLoader(testDataset, batch_size=batchSize, shuffle=True)
 
+    test_solar_all = []
+    test_wind_all  = []
+    for batch in testLoader:
+        test_solar_all.append(batch[:, 0])
+        test_wind_all.append(batch[:, 1])
+    test_solar_all = torch.cat(test_solar_all, dim=0)  # [n_test, 121, 201]
+    test_wind_all  = torch.cat(test_wind_all,  dim=0)
+
+    total_solar_real = test_solar_all.mean(dim=(1,2)).numpy()
+    total_wind_real  = test_wind_all.mean(dim=(1,2)).numpy()
+    sw_corr_real     = np.corrcoef(total_solar_real, total_wind_real)[0,1]   # sw_corr_real is now fixed — compute it once, reuse every epoch
+
     # ---GENERATOR-----------------------------------------------------------------------------------------------------------------
     netG = Generator(ngpu, nz, ngf, nc, lat, lon).to(device)
 
@@ -318,8 +330,10 @@ def main():
     n_critic = 5        # critic steps per generator step
     optimizerD = torch.optim.Adam(netD.parameters(), lr=lr_D, betas=(0.0, 0.9))
     optimizerG = torch.optim.Adam(netG.parameters(), lr=lr_G, betas=(0.0, 0.9))
+    schedulerD = torch.optim.lr_scheduler.ExponentialLR(optimizerD, gamma=0.99)
+    schedulerG = torch.optim.lr_scheduler.ExponentialLR(optimizerG, gamma=0.99)
 
-    best_score = -float('inf')
+    best_score = float('inf')
     patience = 20       # stop if no improvement for this many epochs
     min_delta = 0.01
     epochs_no_improve = 0
@@ -373,16 +387,9 @@ def main():
             "generated_sample": wandb.Image(f"epoch_{epoch}_sample.png"),
             "epoch": epoch,
         })
-        # --"Balance score": how far loss_D is from ideal equilibrium (0.7)
-        # --and penalize if generator is losing badly
-        # balance_score = abs(loss_D.item() - 0.7) + max(0, loss_G.item() - 4.0)
-        # if balance_score < best_score:
-            # best_score = balance_score
-
-        # --Lower wasserstein distance = better
-        wasserstein_dist = (score_real - score_fake).item()
-        if wasserstein_dist > best_score + min_delta:
-            best_score = wasserstein_dist
+        
+        if sw_corr_error < best_score - min_delta:
+            best_score = sw_corr_error
             epochs_no_improve = 0
             save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, filepath=Path("Resources/checkpoints/best.pt"))
             print(f"New best checkpoint at epoch {epoch} (score={wasserstein_dist:.4f})")
@@ -399,21 +406,17 @@ def main():
 
         # Quick monitoring metrics — cheap to compute
         solar_synth, wind_synth = sample_synthetic_days(netG, stats, n_samples=500, device=device)
-        real_batch = next(iter(testLoader))  # grab a test batch
-
-        total_solar_real  = real_batch[:, 0].mean(dim=(1,2)).numpy()
-        total_wind_real   = real_batch[:, 1].mean(dim=(1,2)).numpy()
         total_solar_synth = solar_synth.mean(axis=(1,2))
         total_wind_synth  = wind_synth.mean(axis=(1,2))
-
-        sw_corr_real  = np.corrcoef(total_solar_real,  total_wind_real)[0,1]
         sw_corr_synth = np.corrcoef(total_solar_synth, total_wind_synth)[0,1]
         sw_corr_error = abs(sw_corr_real - sw_corr_synth)
 
-        wandb.log({
-            "sw_correlation_error": sw_corr_error,
-            "epoch": epoch,
-        })
+        wandb.log({"sw_correlation_error": sw_corr_error, "epoch": epoch})
+
+        # ---Add learning rate schedulers
+        schedulerD.step()
+        schedulerG.step()
+        wandb.log({"lr_G": schedulerG.get_last_lr()[0], "lr_D": schedulerD.get_last_lr()[0]})
         
     wandb.finish()
 
