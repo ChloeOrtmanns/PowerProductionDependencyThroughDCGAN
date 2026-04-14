@@ -3,6 +3,7 @@
 
 # ---IMPORTS-------------------------------------------------------------------------------------------------------------------
 from pathlib import Path
+import numpy as np
 import xarray as xr
 import torch
 import torch.nn as nn
@@ -45,6 +46,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device {device}.")
 
 wandb.init(
+    name="lr-schedulers,sw-corr-moni,ncritic:5",
     project="dcgan-energy",
     config={
         "nz": nz, "ngf": ngf, "ndf": ndf, "nc": nc,
@@ -339,7 +341,13 @@ def main():
     epochs_no_improve = 0
 
     for epoch in range(numEpochs):
-        data_iter = iter(trainLoader)
+        # Accumulators
+        epoch_loss_D = 0.0
+        epoch_loss_G = 0.0
+        epoch_wdist  = 0.0
+        epoch_gp     = 0.0
+        n_batches    = 0
+
         for i, real_data in enumerate(trainLoader):
 
             real_data = real_data.to(device)
@@ -366,22 +374,35 @@ def main():
             loss_G.backward()
             optimizerG.step()
 
-            # -------------------------------
-            if i % 50 == 0:
-                print(f"... GP: {gp.item():.4f}")
-                print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
-                    f"Loss_D: {loss_D.item():.4f}  Loss_G: {loss_G.item():.4f}  "
-                    f"W-dist: {(score_real - score_fake).item():.4f}")
-                wandb.log({
-                    "loss_D": loss_D.item(),
-                    "loss_G": loss_G.item(),
-                    "wasserstein_distance": (score_real - score_fake).item(),
-                    "score_real": score_real.item(),
-                    "score_fake": score_fake.item(),
-                    "epoch": epoch,
-                    "step": epoch * len(trainLoader) + i,
-                })
+            # To keep track of the avg of the epoch
+            epoch_loss_D += loss_D.item()
+            epoch_loss_G += loss_G.item()
+            epoch_wdist  += (score_real - score_fake).item()
+            epoch_gp     += gp.item()
+            n_batches    += 1
+
         # --- END OF EPOCH EVALUATION ---
+        avg_loss_D = epoch_loss_D / n_batches
+        avg_loss_G = epoch_loss_G / n_batches
+        avg_wdist  = epoch_wdist  / n_batches
+        avg_gp     = epoch_gp     / n_batches
+
+        print(
+            f"[{epoch}/{numEpochs}] "
+            f"Loss_D: {avg_loss_D:.4f}  "
+            f"Loss_G: {avg_loss_G:.4f}  "
+            f"W-dist: {avg_wdist:.4f}  "
+            f"GP: {avg_gp:.4f}"
+        )
+
+        wandb.log({
+            "loss_D": avg_loss_D,
+            "loss_G": avg_loss_G,
+            "wasserstein_distance": avg_wdist,
+            "gp": avg_gp,
+            "epoch": epoch,
+        })
+
         show_generated_samples(netG, torch.load(statsPath), epoch, nz=nz, device=device)
         wandb.log({
             "generated_sample": wandb.Image(f"epoch_{epoch}_sample.png"),
