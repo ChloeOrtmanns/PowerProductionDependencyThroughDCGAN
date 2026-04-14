@@ -240,6 +240,18 @@ def gradient_penalty(netD, real_data, fake_data, device):
     gp = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
     return gp
 
+def sample_synthetic_days(generator, stats, n_samples, nz=100, device='cpu'):
+    generator.eval()
+    with torch.no_grad():
+        noise = torch.randn(n_samples, nz, 1, 1, device=device)
+        fake = generator(noise)  # [n_samples, 2, 121, 201]
+
+        # Denormalize
+        solar = (fake[:, 0] + 1) / 2 * (stats["solarMax"] - stats["solarMin"]) + stats["solarMin"]
+        wind  = (fake[:, 1] + 1) / 2 * (stats["windMax"] - stats["windMin"]) + stats["windMin"]
+
+    return solar.cpu().numpy(), wind.cpu().numpy()
+
 
 
 def main():
@@ -248,6 +260,7 @@ def main():
     # calculateSaveStatsSplits()
 
     # ---NORMALIZED-DATASET--------------------------------------------------------------------------------------------------------
+    stats = torch.load(statsPath)
     solarPaths, windPaths = pathsLists()
     normalizedDs = EnergyDataset(
         solarPaths,
@@ -300,101 +313,41 @@ def main():
     # ---TRAININGLOOP-------------------------------------------------------------------------------------------------------------
     show_real_sample(trainLoader, torch.load(statsPath), device)
     
-    # ----Vanilla DCGAN----
-    # criterion = nn.BCELoss() # Binary Cross Entropy loss -> can be changed into WGAN
-    # --set up two separate optimizers. As specified in the DCGAN paper, both are Adam optimizers with learning rate 0.0002 and Beta1 = 0.5
-    # beta1 = 0.5
-    # optimizerD = torch.optim.Adam(netD.parameters(), lr=0.00005, betas=(beta1, 0.999))
-    # optimizerG = torch.optim.Adam(netG.parameters(), lr=0.0002, betas=(beta1, 0.999))
     # ----WGAN-GP----------
     lambda_gp = 10      # gradient penalty weight — standard value from the paper
-    n_critic = 2        # critic steps per generator step
+    n_critic = 5        # critic steps per generator step
     optimizerD = torch.optim.Adam(netD.parameters(), lr=lr_D, betas=(0.0, 0.9))
     optimizerG = torch.optim.Adam(netG.parameters(), lr=lr_G, betas=(0.0, 0.9))
 
-    best_score = float('inf')
+    best_score = -float('inf')
     patience = 20       # stop if no improvement for this many epochs
     min_delta = 0.01
     epochs_no_improve = 0
 
     for epoch in range(numEpochs):
+        data_iter = iter(trainLoader)
         for i, real_data in enumerate(trainLoader):
 
-            # --- FORMAT BATCH ---
-            real_data = real_data.to(device)   # [B, 2, 121, 201]
+            real_data = real_data.to(device)
             b_size = real_data.size(0)
 
-            # --- LABEL SMOOTHING ---
-            # --Label smoothing is a regularization technique in deep learning that prevents models from becoming overconfident
-            # --by replacing strict "hard" one-hot encoded targets (e.g., [0,0,1]) with "soft" target probabilities (e.g., [0.5,0.5,0.9]).
-            # --It improves model generalization and reduces overfitting by encouraging smaller logit gaps, often enhancing test accuracy
-            # real_labels = torch.full((b_size, 1), 0.9, device=device)  # real=0.9 instead of 1
-            # fake_labels = torch.full((b_size, 1), 0.0, device=device)  # fake=0
-            # --- DISCRIMINATOR ---
-            # netD.zero_grad()
-            # --- Add noise (decays over time) ---
-            # noise_strength = max(0.1 * (1 - epoch / numEpochs), 0.01)
-            # real_data_noisy = real_data + noise_strength * torch.randn_like(real_data)
-            # output_real = netD(real_data_noisy).view(-1, 1)
-            # --Calculate D's loss on real batch
-            # loss_real = criterion(output_real, real_labels)
-            # --Generate batch of latent vectors
-            # noise = torch.randn(b_size, nz, 1, 1, device=device)
-            # --Generate fake data batch with G
-            # fake_data = netG(noise)
-            # fake_data_noisy = fake_data.detach() + noise_strength * torch.randn_like(fake_data)
-            # output_fake = netD(fake_data_noisy).view(-1, 1)
-            # --Calculate D's loss on fake batch
-            # loss_fake = criterion(output_fake, fake_labels)
-            # loss_D = loss_real + loss_fake
-            # --You can calculate gradients for D in backward pass
-            # loss_D.backward()
-            # --Update D
-            # optimizerD.step()
-
-            # --- CRITIC (train n_critic times per generator step) ---
+            # CRITIC
             for _ in range(n_critic):
                 netD.zero_grad()
-
                 noise = torch.randn(b_size, nz, 1, 1, device=device)
                 fake_data = netG(noise).detach()
-
                 score_real = netD(real_data).mean()
                 score_fake = netD(fake_data).mean()
-
                 gp = gradient_penalty(netD, real_data, fake_data, device)
-
-                # Critic wants to MAXIMISE (score_real - score_fake)
-                # so we minimise the negative of that
                 loss_D = -score_real + score_fake + lambda_gp * gp
                 loss_D.backward()
                 optimizerD.step()
 
 
-            # --- GENERATOR ---
-            # for _ in range(3):  # train G more frequently
-            #     netG.zero_grad()
-
-            #     # Generate fake again to get fresh gradients
-            #     noise = torch.randn(b_size, nz, 1, 1, device=device)
-            #     fake_data = netG(noise)
-
-            #     # Perform a forward pass of all-fake batch through D
-            #     output_fake = netD(fake_data).view(-1, 1)
-            #     # Calculate G's loss
-            #     loss_G = criterion(output_fake, real_labels)  # trick D to think fakes are real
-            #     # Calculate gradients for G
-            #     loss_G.backward()
-            #     # Update G
-            #     optimizerG.step()
-
-            # --- GENERATOR (train once) ---
+            # GENERATOR
             netG.zero_grad()
-
             noise = torch.randn(b_size, nz, 1, 1, device=device)
             fake_data = netG(noise)
-
-            # Generator wants to MAXIMISE score_fake (fool the critic)
             loss_G = -netD(fake_data).mean()
             loss_G.backward()
             optimizerG.step()
@@ -428,7 +381,7 @@ def main():
 
         # --Lower wasserstein distance = better
         wasserstein_dist = (score_real - score_fake).item()
-        if wasserstein_dist < best_score - min_delta:
+        if wasserstein_dist > best_score + min_delta:
             best_score = wasserstein_dist
             epochs_no_improve = 0
             save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, filepath=Path("Resources/checkpoints/best.pt"))
@@ -443,6 +396,24 @@ def main():
         save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, filepath=Path("Resources/checkpoints/latest.pt"))
         # wandb.log({"balance_score": balance_score, "epoch": epoch})
         wandb.log({"wasserstein_dist": wasserstein_dist, "epoch": epoch})
+
+        # Quick monitoring metrics — cheap to compute
+        solar_synth, wind_synth = sample_synthetic_days(netG, stats, n_samples=500, device=device)
+        real_batch = next(iter(testLoader))  # grab a test batch
+
+        total_solar_real  = real_batch[:, 0].mean(dim=(1,2)).numpy()
+        total_wind_real   = real_batch[:, 1].mean(dim=(1,2)).numpy()
+        total_solar_synth = solar_synth.mean(axis=(1,2))
+        total_wind_synth  = wind_synth.mean(axis=(1,2))
+
+        sw_corr_real  = np.corrcoef(total_solar_real,  total_wind_real)[0,1]
+        sw_corr_synth = np.corrcoef(total_solar_synth, total_wind_synth)[0,1]
+        sw_corr_error = abs(sw_corr_real - sw_corr_synth)
+
+        wandb.log({
+            "sw_correlation_error": sw_corr_error,
+            "epoch": epoch,
+        })
         
     wandb.finish()
 
