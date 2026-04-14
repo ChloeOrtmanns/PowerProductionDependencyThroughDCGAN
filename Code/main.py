@@ -36,6 +36,8 @@ ngf = 64            # 32 is trauning is unstable, 128 for more detail
 # |---------ngf ↓ → simpler model → more stable → less expressive
 nc = 2
 ndf = 32
+lr_G = 0.0002
+lr_D = 0.0001
 
 
 print(f"Using Pytorch {torch.__version__}.")
@@ -47,8 +49,8 @@ wandb.init(
     config={
         "nz": nz, "ngf": ngf, "ndf": ndf, "nc": nc,
         "batchSize": batchSize, "numEpochs": numEpochs,
-        "lr_G": 0.0002, "lr_D": 0.00005,
-        "beta1": 0.5,
+        "lr_G": lr_G, "lr_D": lr_D,
+        "beta1": 0.0, "beta2": 0.9
     }
 )
 
@@ -101,7 +103,8 @@ def weights_init(m):
     # and batch normalization layers to meet this criteria. This function is applied to the models immediately after initialization.
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
+        # nn.init.normal_(m.weight.data, 0.0, 0.02)
+        nn.init.normal_(m.weight_orig if hasattr(m, 'weight_orig') else m.weight, 0.0, 0.02)
     elif classname.find('BatchNorm') != -1:
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
@@ -216,6 +219,27 @@ def load_checkpoint(filepath, netG, netD, optimizerG, optimizerD, device):
     print(f"Loaded checkpoint from {filepath} (epoch {ckpt['epoch']})")
     return ckpt["epoch"]
 
+# for the Weisser GAN
+def gradient_penalty(netD, real_data, fake_data, device):
+    b_size = real_data.size(0)
+    # Random interpolation between real and fake
+    alpha = torch.rand(b_size, 1, 1, 1, device=device)
+    interpolated = (alpha * real_data + (1 - alpha) * fake_data.detach()).requires_grad_(True)
+
+    score = netD(interpolated)
+
+    gradients = torch.autograd.grad(
+        outputs=score,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(score),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+
+    gradients = gradients.view(b_size, -1)
+    gp = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    return gp
+
 
 
 def main():
@@ -268,23 +292,29 @@ def main():
     netD.apply(weights_init)
 
     # ---Testing---
-    # x = torch.randn(1, 2, 121, 201).to(device)
-    # out = netD(x)
+    x = torch.randn(1, 2, 121, 201).to(device)
+    out = netD(x, debug=True)
 
     # print(out.shape)
 
     # ---TRAININGLOOP-------------------------------------------------------------------------------------------------------------
     show_real_sample(trainLoader, torch.load(statsPath), device)
     
-    criterion = nn.BCELoss() # Binary Cross Entropy loss -> can be changed into WGAN
-
-    #  set up two separate optimizers. As specified in the DCGAN paper, both are Adam optimizers with learning rate 0.0002 and Beta1 = 0.5
-    beta1 = 0.5
-    optimizerD = torch.optim.Adam(netD.parameters(), lr=0.00005, betas=(beta1, 0.999))
-    optimizerG = torch.optim.Adam(netG.parameters(), lr=0.0002, betas=(beta1, 0.999))
+    # ----Vanilla DCGAN----
+    # criterion = nn.BCELoss() # Binary Cross Entropy loss -> can be changed into WGAN
+    # --set up two separate optimizers. As specified in the DCGAN paper, both are Adam optimizers with learning rate 0.0002 and Beta1 = 0.5
+    # beta1 = 0.5
+    # optimizerD = torch.optim.Adam(netD.parameters(), lr=0.00005, betas=(beta1, 0.999))
+    # optimizerG = torch.optim.Adam(netG.parameters(), lr=0.0002, betas=(beta1, 0.999))
+    # ----WGAN-GP----------
+    lambda_gp = 10      # gradient penalty weight — standard value from the paper
+    n_critic = 2        # critic steps per generator step
+    optimizerD = torch.optim.Adam(netD.parameters(), lr=lr_D, betas=(0.0, 0.9))
+    optimizerG = torch.optim.Adam(netG.parameters(), lr=lr_G, betas=(0.0, 0.9))
 
     best_score = float('inf')
-    patience = 10       # stop if no improvement for this many epochs
+    patience = 20       # stop if no improvement for this many epochs
+    min_delta = 0.01
     epochs_no_improve = 0
 
     for epoch in range(numEpochs):
@@ -295,66 +325,92 @@ def main():
             b_size = real_data.size(0)
 
             # --- LABEL SMOOTHING ---
-            # Label smoothing is a regularization technique in deep learning that prevents models from becoming overconfident
-            # by replacing strict "hard" one-hot encoded targets (e.g., [0,0,1]) with "soft" target probabilities (e.g., [0.5,0.5,0.9]).
-            # It improves model generalization and reduces overfitting by encouraging smaller logit gaps, often enhancing test accuracy
-            real_labels = torch.full((b_size, 1), 0.9, device=device)  # real=0.9 instead of 1
-            fake_labels = torch.full((b_size, 1), 0.0, device=device)  # fake=0
-
+            # --Label smoothing is a regularization technique in deep learning that prevents models from becoming overconfident
+            # --by replacing strict "hard" one-hot encoded targets (e.g., [0,0,1]) with "soft" target probabilities (e.g., [0.5,0.5,0.9]).
+            # --It improves model generalization and reduces overfitting by encouraging smaller logit gaps, often enhancing test accuracy
+            # real_labels = torch.full((b_size, 1), 0.9, device=device)  # real=0.9 instead of 1
+            # fake_labels = torch.full((b_size, 1), 0.0, device=device)  # fake=0
             # --- DISCRIMINATOR ---
-            netD.zero_grad()
-
+            # netD.zero_grad()
             # --- Add noise (decays over time) ---
-            noise_strength = max(0.1 * (1 - epoch / numEpochs), 0.01)
+            # noise_strength = max(0.1 * (1 - epoch / numEpochs), 0.01)
+            # real_data_noisy = real_data + noise_strength * torch.randn_like(real_data)
+            # output_real = netD(real_data_noisy).view(-1, 1)
+            # --Calculate D's loss on real batch
+            # loss_real = criterion(output_real, real_labels)
+            # --Generate batch of latent vectors
+            # noise = torch.randn(b_size, nz, 1, 1, device=device)
+            # --Generate fake data batch with G
+            # fake_data = netG(noise)
+            # fake_data_noisy = fake_data.detach() + noise_strength * torch.randn_like(fake_data)
+            # output_fake = netD(fake_data_noisy).view(-1, 1)
+            # --Calculate D's loss on fake batch
+            # loss_fake = criterion(output_fake, fake_labels)
+            # loss_D = loss_real + loss_fake
+            # --You can calculate gradients for D in backward pass
+            # loss_D.backward()
+            # --Update D
+            # optimizerD.step()
 
-            real_data_noisy = real_data + noise_strength * torch.randn_like(real_data)
-            output_real = netD(real_data_noisy).view(-1, 1)
-            # Calculate D's loss on real batch
-            loss_real = criterion(output_real, real_labels)
+            # --- CRITIC (train n_critic times per generator step) ---
+            for _ in range(n_critic):
+                netD.zero_grad()
 
-            # Generate batch of latent vectors
-            noise = torch.randn(b_size, nz, 1, 1, device=device)
-            # Generate fake data batch with G
-            fake_data = netG(noise)
+                noise = torch.randn(b_size, nz, 1, 1, device=device)
+                fake_data = netG(noise).detach()
 
-            fake_data_noisy = fake_data.detach() + noise_strength * torch.randn_like(fake_data)
-            
-            output_fake = netD(fake_data_noisy).view(-1, 1)
-            # Calculate D's loss on fake batch
-            loss_fake = criterion(output_fake, fake_labels)
+                score_real = netD(real_data).mean()
+                score_fake = netD(fake_data).mean()
 
-            loss_D = loss_real + loss_fake
-            # You can calculate gradients for D in backward pass
-            loss_D.backward()
-            # Update D
-            optimizerD.step()
+                gp = gradient_penalty(netD, real_data, fake_data, device)
+
+                # Critic wants to MAXIMISE (score_real - score_fake)
+                # so we minimise the negative of that
+                loss_D = -score_real + score_fake + lambda_gp * gp
+                loss_D.backward()
+                optimizerD.step()
+
 
             # --- GENERATOR ---
-            for _ in range(3):  # train G more frequently
-                netG.zero_grad()
+            # for _ in range(3):  # train G more frequently
+            #     netG.zero_grad()
 
-                # Generate fake again to get fresh gradients
-                noise = torch.randn(b_size, nz, 1, 1, device=device)
-                fake_data = netG(noise)
+            #     # Generate fake again to get fresh gradients
+            #     noise = torch.randn(b_size, nz, 1, 1, device=device)
+            #     fake_data = netG(noise)
 
-                # Perform a forward pass of all-fake batch through D
-                output_fake = netD(fake_data).view(-1, 1)
-                # Calculate G's loss
-                loss_G = criterion(output_fake, real_labels)  # trick D to think fakes are real
-                # Calculate gradients for G
-                loss_G.backward()
-                # Update G
-                optimizerG.step()
+            #     # Perform a forward pass of all-fake batch through D
+            #     output_fake = netD(fake_data).view(-1, 1)
+            #     # Calculate G's loss
+            #     loss_G = criterion(output_fake, real_labels)  # trick D to think fakes are real
+            #     # Calculate gradients for G
+            #     loss_G.backward()
+            #     # Update G
+            #     optimizerG.step()
+
+            # --- GENERATOR (train once) ---
+            netG.zero_grad()
+
+            noise = torch.randn(b_size, nz, 1, 1, device=device)
+            fake_data = netG(noise)
+
+            # Generator wants to MAXIMISE score_fake (fool the critic)
+            loss_G = -netD(fake_data).mean()
+            loss_G.backward()
+            optimizerG.step()
 
             # -------------------------------
             if i % 50 == 0:
-                # print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
-                #     f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
+                print(f"... GP: {gp.item():.4f}")
                 print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
-                    f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
+                    f"Loss_D: {loss_D.item():.4f}  Loss_G: {loss_G.item():.4f}  "
+                    f"W-dist: {(score_real - score_fake).item():.4f}")
                 wandb.log({
                     "loss_D": loss_D.item(),
                     "loss_G": loss_G.item(),
+                    "wasserstein_distance": (score_real - score_fake).item(),
+                    "score_real": score_real.item(),
+                    "score_fake": score_fake.item(),
                     "epoch": epoch,
                     "step": epoch * len(trainLoader) + i,
                 })
@@ -364,15 +420,19 @@ def main():
             "generated_sample": wandb.Image(f"epoch_{epoch}_sample.png"),
             "epoch": epoch,
         })
-        # "Balance score": how far loss_D is from ideal equilibrium (0.7)
-        # and penalize if generator is losing badly
-        balance_score = abs(loss_D.item() - 0.7) + max(0, loss_G.item() - 4.0)
+        # --"Balance score": how far loss_D is from ideal equilibrium (0.7)
+        # --and penalize if generator is losing badly
+        # balance_score = abs(loss_D.item() - 0.7) + max(0, loss_G.item() - 4.0)
+        # if balance_score < best_score:
+            # best_score = balance_score
 
-        if balance_score < best_score:
-            best_score = balance_score
+        # --Lower wasserstein distance = better
+        wasserstein_dist = (score_real - score_fake).item()
+        if wasserstein_dist < best_score - min_delta:
+            best_score = wasserstein_dist
             epochs_no_improve = 0
-            save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, path=Path("Resources/checkpoints/best/best.pt"))
-            print(f"New best checkpoint at epoch {epoch} (score={balance_score:.4f})")
+            save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, filepath=Path("Resources/checkpoints/best.pt"))
+            print(f"New best checkpoint at epoch {epoch} (score={wasserstein_dist:.4f})")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
@@ -380,8 +440,9 @@ def main():
                 break
 
         # Also save a "latest" every epoch so you can always resume
-        save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, path=Path("Resources/checkpoints/latest/latest.pt"))
-        wandb.log({"balance_score": balance_score, "epoch": epoch})
+        save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, filepath=Path("Resources/checkpoints/latest.pt"))
+        # wandb.log({"balance_score": balance_score, "epoch": epoch})
+        wandb.log({"wasserstein_dist": wasserstein_dist, "epoch": epoch})
         
     wandb.finish()
 
