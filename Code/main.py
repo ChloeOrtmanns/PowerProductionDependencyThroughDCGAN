@@ -9,19 +9,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
+import wandb
 
 import matplotlib.pyplot as plt
 
+from Models.generator import Generator
+from Models.discriminator import Discriminator
+
 # ---VARIABLES-----------------------------------------------------------------------------------------------------------------
-statsPath = Path("Resources\stats.pt")
-splitsPath = Path("Resources\splits.pt")
-pathsPath = Path("Resources\paths.pt")
+statsPath = Path("Resources/stats.pt")
+splitsPath = Path("Resources/splits.pt")
+pathsPath = Path("Resources/paths.pt")
+checkpointPath = ("Resources/checkpoints")
 
 lat = 121
 lon = 201
 
 latentDim = 10      # latent dimension
-numEpochs = 10       # number of training epochs. You may increase it to gain better results but it will take more time.
+numEpochs = 150       # number of training epochs. You may increase it to gain better results but it will take more time.
 batchSize = 32      # -> that means it'll group them by 32 in one batch, so 11x32+13=365 for one year
 ngpu = 0
 nz = 100            # Size of z latent vector (underlying degrees of freedom)
@@ -36,6 +41,16 @@ ndf = 32
 print(f"Using Pytorch {torch.__version__}.")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device {device}.")
+
+wandb.init(
+    project="dcgan-energy",
+    config={
+        "nz": nz, "ngf": ngf, "ndf": ndf, "nc": nc,
+        "batchSize": batchSize, "numEpochs": numEpochs,
+        "lr_G": 0.0002, "lr_D": 0.00005,
+        "beta1": 0.5,
+    }
+)
 
 # ---DATASET+LOADER------------------------------------------------------------------------------------------------------------
 # ---NORMALIZATION-------------------------------------------------------------------------------------------------------------
@@ -77,89 +92,6 @@ class EnergyDataset(Dataset):
         x = torch.stack([solarTensor, windTensor], dim=0)
 
         return x
-
-class Discriminator(nn.Module):
-    def __init__(self, ngpu):
-        super(Discriminator, self).__init__()
-
-        self.main = nn.Sequential(
-            # Input: (2, 121, 201)
-
-            nn.Conv2d(nc, ndf, kernel_size=4, stride=2, padding=1, bias=False),  # ~60x100
-            nn.LeakyReLU(0.2, inplace=True),
-
-            nn.Conv2d(ndf, ndf*2, kernel_size=4, stride=2, padding=1, bias=False),  # ~30x50
-            nn.BatchNorm2d(ndf*2),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            nn.Conv2d(ndf*2, ndf*4, kernel_size=4, stride=2, padding=1, bias=False),  # ~15x25
-            nn.BatchNorm2d(ndf*4),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            nn.Conv2d(ndf*4, ndf*8, kernel_size=4, stride=2, padding=1, bias=False),  # ~7x12
-            nn.BatchNorm2d(ndf*8),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            # Final collapse
-            nn.Conv2d(ndf*8, 1, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.AdaptiveAvgPool2d((1,1)),
-            nn.Flatten(),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x, debug=False):
-        for i, layer in enumerate(self.main):
-            x = layer(x)
-            if debug:
-                print(f"Layer {i} ({type(layer).__name__}): {x.shape}")
-        return x
-
-# The generator is designed to map the latent space vector to data-space.
-class Generator(nn.Module):
-    def __init__(self, ngpu):
-        super(Generator, self).__init__()
-        self.ngpu = ngpu
-        self.main = nn.Sequential(
-            #---------------------------------CODE WEBSITE----------------------------------------------
-            # input z: (nz, 1, 1)
-
-            nn.ConvTranspose2d(nz, ngf*8, kernel_size=4, stride=1, padding=0, bias=False), 
-            nn.BatchNorm2d(ngf*8),
-            nn.ReLU(True),
-            
-            nn.ConvTranspose2d(ngf*8, ngf*4, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(ngf*4),
-            nn.ReLU(True),
-
-            nn.ConvTranspose2d(ngf*4, ngf*2, kernel_size=4, stride=2, padding=1, bias=False), # 24x24
-            nn.BatchNorm2d(ngf*2),
-            nn.ReLU(True),
-
-            nn.ConvTranspose2d(ngf*2, ngf, kernel_size=4, stride=2, padding=1, bias=False), # 120x120
-            nn.BatchNorm2d(ngf),
-            nn.ReLU(True),
-
-            # final layer → 
-            nn.ConvTranspose2d(ngf, nc, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.Tanh()
-        )
-
-    def forward(self, input_tensor, debug=False):
-        if debug:
-            print(f"Input: {input_tensor.shape}")
-
-        for i, layer in enumerate(self.main):
-            input_tensor = layer(input_tensor)
-            if debug:
-                print(f"Layer {i} ({type(layer).__name__}): {input_tensor.shape}")
-        
-        # input_tensor = F.interpolate(input_tensor, size=(lat,lon), mode='bilinear', align_corners=False)
-        input_tensor = F.interpolate(input_tensor, size=(lat, lon), mode='bilinear')
-        # input_tensor = input_tensor[:, :, :lat, :lon]
-        if debug:
-            print(f"After interpolation: {input_tensor.shape}")
-
-        return input_tensor
 
 # ---FUNCTIONS-----------------------------------------------------------------------------------------------------------------    
 def weights_init(m):                                
@@ -264,6 +196,27 @@ def show_real_sample(data_loader, stats, device='cpu'):
     plt.savefig(f"real_sample.png")
     plt.close()
 
+def save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, filepath):
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "epoch": epoch,
+        "netG_state": netG.state_dict(),
+        "netD_state": netD.state_dict(),
+        "optimizerG_state": optimizerG.state_dict(),
+        "optimizerD_state": optimizerD.state_dict(),
+    }, filepath)
+    print(f"Saved checkpoint → {filepath}")
+
+def load_checkpoint(filepath, netG, netD, optimizerG, optimizerD, device):
+    ckpt = torch.load(filepath, map_location=device)
+    netG.load_state_dict(ckpt["netG_state"])
+    netD.load_state_dict(ckpt["netD_state"])
+    optimizerG.load_state_dict(ckpt["optimizerG_state"])
+    optimizerD.load_state_dict(ckpt["optimizerD_state"])
+    print(f"Loaded checkpoint from {filepath} (epoch {ckpt['epoch']})")
+    return ckpt["epoch"]
+
+
 
 def main():
     # only run this function once
@@ -292,7 +245,7 @@ def main():
     testLoader = DataLoader(testDataset, batch_size=batchSize, shuffle=True)
 
     # ---GENERATOR-----------------------------------------------------------------------------------------------------------------
-    netG = Generator(ngpu).to(device)
+    netG = Generator(ngpu, nz, ngf, nc, lat, lon).to(device)
 
     # Handle multi-GPU if desired
     if (device.type == 'cuda') and (ngpu > 1):
@@ -307,7 +260,7 @@ def main():
     # should be torch.Size([1, 2, 121, 201])
 
     # ---DISCRIMINATOR------------------------------------------------------------------------------------------------------------
-    netD = Discriminator(ngpu).to(device)
+    netD = Discriminator(ngpu, nc, ndf).to(device)
 
     if (device.type == 'cuda') and (ngpu > 1):
         netD = nn.DataParallel(netD, list(range(ngpu)))
@@ -329,6 +282,10 @@ def main():
     beta1 = 0.5
     optimizerD = torch.optim.Adam(netD.parameters(), lr=0.00005, betas=(beta1, 0.999))
     optimizerG = torch.optim.Adam(netG.parameters(), lr=0.0002, betas=(beta1, 0.999))
+
+    best_score = float('inf')
+    patience = 10       # stop if no improvement for this many epochs
+    epochs_no_improve = 0
 
     for epoch in range(numEpochs):
         for i, real_data in enumerate(trainLoader):
@@ -391,10 +348,42 @@ def main():
 
             # -------------------------------
             if i % 50 == 0:
+                # print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
+                #     f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
                 print(f"[{epoch}/{numEpochs}] [{i}/{len(trainLoader)}] "
                     f"Loss_D: {loss_D.item():.4f} Loss_G: {loss_G.item():.4f}")
-
+                wandb.log({
+                    "loss_D": loss_D.item(),
+                    "loss_G": loss_G.item(),
+                    "epoch": epoch,
+                    "step": epoch * len(trainLoader) + i,
+                })
+        # --- END OF EPOCH EVALUATION ---
         show_generated_samples(netG, torch.load(statsPath), epoch, nz=nz, device=device)
+        wandb.log({
+            "generated_sample": wandb.Image(f"epoch_{epoch}_sample.png"),
+            "epoch": epoch,
+        })
+        # "Balance score": how far loss_D is from ideal equilibrium (0.7)
+        # and penalize if generator is losing badly
+        balance_score = abs(loss_D.item() - 0.7) + max(0, loss_G.item() - 4.0)
+
+        if balance_score < best_score:
+            best_score = balance_score
+            epochs_no_improve = 0
+            save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, path=Path("Resources/checkpoints/best/best.pt"))
+            print(f"New best checkpoint at epoch {epoch} (score={balance_score:.4f})")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch} — no improvement for {patience} epochs")
+                break
+
+        # Also save a "latest" every epoch so you can always resume
+        save_checkpoint(netG, netD, optimizerG, optimizerD, epoch, path=Path("Resources/checkpoints/latest/latest.pt"))
+        wandb.log({"balance_score": balance_score, "epoch": epoch})
+        
+    wandb.finish()
 
 
 if __name__ == "__main__":
