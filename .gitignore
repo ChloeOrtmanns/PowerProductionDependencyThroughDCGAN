@@ -5,3 +5,4 @@ wandb_test.py
 wandb
 __pycache__
 FakeData
+Resources/checkpoints
