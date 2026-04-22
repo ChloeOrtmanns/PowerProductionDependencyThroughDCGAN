@@ -5,8 +5,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
 
-import geopandas as gpd
-from shapely.geometry import box
+# import geopandas as gpd
+# from shapely.geometry import box
 
 def plot(datasetValue, day):
     # Create figure + axis
@@ -63,9 +63,10 @@ def getData(filepath, var):
     # return dataSet[var].isel(time=day-1)
 
 def processUasVasToWindspeed(year):
-    uasOneDay = getData(f"Data/1975-2005/uas/uas_be-04_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc",
+    
+    uasOneDay = getData(f"../../../../mnt/mvbc-gan/Data/2006-2025/uas/uas_be-04_CNRM-CERFACS-CNRM-CM5_rcp45_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc",
                               'uas')
-    vasOneDay = getData(f"Data/1975-2005/vas/vas_be-04_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc",
+    vasOneDay = getData(f"../../../../mnt/mvbc-gan/Data/2006-2025/vas/vas_be-04_CNRM-CERFACS-CNRM-CM5_rcp45_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc",
                               'vas')
     return np.sqrt(uasOneDay**2+vasOneDay**2)
 
@@ -96,7 +97,7 @@ def windEnergyProduction(year):
     windEnergy.name = "Wind Energy Potential"
 
     ### saving files
-    outputPath = Path("Data/Power/Wind") / f"wind_{year}.nc"
+    outputPath = Path("/mnt/mvbc-gan/Data/Power/Wind") / f"wind_{year}.nc"
     outputPath.parent.mkdir(parents=True, exist_ok=True)
     windEnergy.to_netcdf(outputPath)
 
@@ -106,15 +107,15 @@ def windEnergyProduction(year):
 def solarEnergyProduction(year):
     ### variables
     toCelsius = -273.15
-    G = getData(f"Data/1975-2005/rsds/rsds_be-04_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc", "rsds")
+    G = getData(f"../../../../mnt/mvbc-gan/Data/2006-2025/rsds/rsds_be-04_CNRM-CERFACS-CNRM-CM5_rcp45_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc", "rsds")
     Gstc = 1000                                 #[W/m²]
     gamma = -0.005
 
     V = processUasVasToWindspeed(year)
 
     ### Deze zijn in K!!!!
-    Tmean = getData(f"Data/1975-2005/tas/tas_be-04_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc", "tas")
-    Tmax = getData(f"Data/1975-2005/tasmax/tasmax_be-04_CNRM-CERFACS-CNRM-CM5_historical_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc", "tasmax")
+    Tmean = getData(f"../../../../mnt/mvbc-gan/Data/2006-2025/tas/tas_be-04_CNRM-CERFACS-CNRM-CM5_rcp45_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc", "tas")
+    Tmax = getData(f"../../../../mnt/mvbc-gan/Data/2006-2025/tasmax/tasmax_be-04_CNRM-CERFACS-CNRM-CM5_rcp45_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc", "tasmax")
 
     Tref = 25                                   #[°C]
     Taday = (Tmean+toCelsius + Tmax+toCelsius) / 2                  #[°C]
@@ -135,21 +136,21 @@ def solarEnergyProduction(year):
     # plot(solarEnergy, 3)
 
     # ### saving files
-    outputPath = Path("Data/Power/Solar") / f"solar_{year}.nc"
+    outputPath = Path("/mnt/mvbc-gan/Data/Power/Solar") / f"solar_{year}.nc"
     outputPath.parent.mkdir(parents=True, exist_ok=True)
     solarEnergy.to_netcdf(outputPath)    
 
 def main():
-    # for year in range(1975,2006):
-    #     solarEnergyProduction(year)
-    #     windEnergyProduction(year)
+    for year in range(2006,2026):
+        solarEnergyProduction(year)
+        windEnergyProduction(year)
 
     # plot(xr.open_dataset("Data/Power/Solar/solar_2003.nc")["Solar Energy Potential"], 3)
     # plot(xr.open_dataset("Data/Power/Wind/wind_2003.nc")["Wind Energy Potential"], 3)
 
 
 
-    plotTwo(xr.open_dataset("Data/Power/Solar/solar_2003.nc")["Solar Energy Potential"], xr.open_dataset("Data/Power/Wind/wind_2003.nc")["Wind Energy Potential"], 2)
+    # plotTwo(xr.open_dataset("Data/Power/Solar/solar_2003.nc")["Solar Energy Potential"], xr.open_dataset("Data/Power/Wind/wind_2003.nc")["Wind Energy Potential"], 2)
     
 
 

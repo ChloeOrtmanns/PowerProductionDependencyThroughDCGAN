@@ -37,19 +37,11 @@ class EnergyDataset(Dataset):
 
         return x
 
-def get_dataloader(solar_np, wind_np, stats, splits, layer_num, stage_sizes, batch_size=4):
-    dataset = EnergyDataset(
-        solar_np, wind_np,
-        stats=stats,
-        layer_num=layer_num,
-        stage_sizes=stage_sizes
-    )
-
-    subset = Subset(dataset, splits["train"])
-
-    return DataLoader(
-        subset,
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=True
-    )
+def get_dataloader(solar_np, wind_np, stats, splits, layer_num,
+                   STAGE_SIZES, batch_size=4, split="train"):
+    dataset = EnergyDataset(solar_np, wind_np, stats=stats,
+                            layer_num=layer_num, stage_sizes=STAGE_SIZES)  # ← lowercase
+    indices = splits[split]
+    subset  = Subset(dataset, indices)
+    return DataLoader(subset, batch_size=batch_size,
+                      shuffle=(split == "train"), drop_last=True)
