@@ -15,6 +15,8 @@ from scipy.stats import wasserstein_distance
 import wandb
 import matplotlib.pyplot as plt
 from scipy.stats import rankdata, norm
+from scipy.stats import multivariate_normal
+from scipy.stats import gaussian_kde
 import numpy as np
 
 from torchmetrics.functional.image import structural_similarity_index_measure as ssim
@@ -22,6 +24,7 @@ from torchmetrics.functional.image import structural_similarity_index_measure as
 from Models.generator import Generator
 from Models.discriminator import Discriminator
 from Models.energyDataset import EnergyDataset, get_dataloader
+from Models.copulaMapGen import generate_copula_map
 
 # ---VARIABLES-----------------------------------------------------------------------------------------------------------------
 statsPath      = Path("Resources/stats.pt")
@@ -185,6 +188,8 @@ def get_total_iters(layer_num):
     }[layer_num]
 
 
+
+
 def plot_real_vs_fake(real_imgs, fake_imgs, stats, layer_num):
     real_imgs = real_imgs.cpu()
     fake_imgs = fake_imgs.cpu()
@@ -247,9 +252,6 @@ def plot_real_vs_fake(real_imgs, fake_imgs, stats, layer_num):
             f"Each column is one test sample | colorscale shared per row per sample")
     })
 
-
-
-
 def plot_histograms(real_imgs, fake_imgs, stats, layer_num):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
@@ -272,8 +274,6 @@ def plot_histograms(real_imgs, fake_imgs, stats, layer_num):
             f"Stage {layer_num} | Pixel value distributions in [-1,1] | "
             f"Fake should match Real shape — gaps indicate the generator misses certain value ranges")
     })
-
-
 
 def plot_metrics_dashboard(real_imgs, fake_imgs, stats, layer_num):
     real_imgs = real_imgs.cpu()
@@ -355,26 +355,508 @@ def plot_metrics_dashboard(real_imgs, fake_imgs, stats, layer_num):
     plt.close()
 
     wandb.log({
-    "metrics_dashboard": wandb.Image(path, caption=
-        f"Stage {layer_num} | Wasserstein: lower=better | "
-        f"Autocorr: fake should match real | Solar-Wind corr: real≈-0.5 physically expected"),
-    "metrics_table": wandb.Table(
-        columns=["metric", "real", "fake"],
-        data=[
-            ["solar_wasserstein",  metrics["solar_wasserstein"],  None],
-            ["wind_wasserstein",   metrics["wind_wasserstein"],   None],
-            ["solar_autocorr",     metrics["solar_autocorr_real"], metrics["solar_autocorr_fake"]],
-            ["wind_autocorr",      metrics["wind_autocorr_real"],  metrics["wind_autocorr_fake"]],
-            ["solar_wind_corr",    metrics["corr_real"],           metrics["corr_fake"]],
-            ["solar_mean",         metrics["solar_mean_real"],     metrics["solar_mean_fake"]],
-            ["wind_mean",          metrics["wind_mean_real"],      metrics["wind_mean_fake"]],
-            ["solar_std",          metrics["solar_std_real"],      metrics["solar_std_fake"]],
-            ["wind_std",           metrics["wind_std_real"],       metrics["wind_std_fake"]],
-        ]
+        "metrics_dashboard": wandb.Image(path, caption=
+            f"Stage {layer_num} | Wasserstein: lower=better | "
+            f"Autocorr: fake should match real | Solar-Wind corr: real≈-0.5 physically expected"),
+        "metrics_table": wandb.Table(
+            columns=["metric", "real", "fake"],
+            data=[
+                ["solar_wasserstein",  metrics["solar_wasserstein"],  None],
+                ["wind_wasserstein",   metrics["wind_wasserstein"],   None],
+                ["solar_autocorr",     metrics["solar_autocorr_real"], metrics["solar_autocorr_fake"]],
+                ["wind_autocorr",      metrics["wind_autocorr_real"],  metrics["wind_autocorr_fake"]],
+                ["solar_wind_corr",    metrics["corr_real"],           metrics["corr_fake"]],
+                ["solar_mean",         metrics["solar_mean_real"],     metrics["solar_mean_fake"]],
+                ["wind_mean",          metrics["wind_mean_real"],      metrics["wind_mean_fake"]],
+                ["solar_std",          metrics["solar_std_real"],      metrics["solar_std_fake"]],
+                ["wind_std",           metrics["wind_std_real"],       metrics["wind_std_fake"]],
+            ]
+        )
+    })
+
+def fit_and_compare_copula(real_imgs, fake_imgs, layer_num, season_tag="all"):
+    """
+    Fits a Gaussian copula to real data, then scores both real and fake
+    against it. Plug this into evaluate_metrics or evaluate_from_checkpoint.
+    real_imgs / fake_imgs: (B, 2, H, W) CPU tensors, values in [-1, 1]
+    """
+    # Flatten spatial dims — shape becomes (B*H*W, 2)
+    B, C, H, W = real_imgs.shape
+    real_flat = real_imgs.permute(0,2,3,1).reshape(-1, 2).numpy()  # (N, 2)
+    fake_flat = fake_imgs.permute(0,2,3,1).reshape(-1, 2).numpy()
+
+    # --- Step 1: Probability Integral Transform → uniform [0,1] ---
+    # Use empirical CDF (rank-based) — no parametric assumption needed
+    def to_uniform(data, ref=None):
+        """Transform data to [0,1] using ranks from ref (or data itself)."""
+
+        result = np.zeros_like(data)
+        for col in range(data.shape[1]):
+            ref_col = ref[:, col] if ref is not None else data[:, col]
+            ranks = rankdata(data[:, col], method='ordinal')
+            result[:, col] = ranks / (len(ref_col) + 1)  # normalize by ref length
+        return result
+
+        """
+        you're flattening all pixels across all samples before ranking (B*H*W points).
+        This means the copula is measuring pixel-level solar-wind dependency, not sample-level.
+        That's actually fine and probably what you want physically (every pixel pair is a
+        co-occurrence of solar/wind intensity at a location), but it's worth being conscious of
+        when you interpret results. The copula_rho will reflect the spatial co-variation pattern,
+        not day-to-day correlation between area-averaged values.
+        """
+
+    u_real = to_uniform(real_flat)
+    u_fake = to_uniform(fake_flat, ref=real_flat)  # rank fake against real marginals
+
+    # --- Step 2: Gaussian copula — transform uniform → normal ---
+    # Clip to avoid inf at boundaries
+    eps = 1e-6
+    z_real = norm.ppf(np.clip(u_real, eps, 1 - eps))  # (N, 2)
+    z_fake = norm.ppf(np.clip(u_fake, eps, 1 - eps))
+
+    # --- Step 3: Fit copula correlation matrix on real data ---
+    rho_real = np.corrcoef(z_real.T)          # 2x2 matrix
+    rho_fake = np.corrcoef(z_fake.T)
+
+    copula_rho_real = rho_real[0, 1]          # scalar: real copula correlation
+    copula_rho_fake = rho_fake[0, 1]          # scalar: how well fake preserves it
+
+    # --- Step 3b: Score fake data under the real copula density ---
+    from scipy.stats import multivariate_normal
+
+    idx = np.random.choice(len(z_fake), size=min(10000, len(z_fake)), replace=False)
+    z_fake_sub = z_fake[idx]
+    z_real_sub = z_real[idx]
+
+    copula_density = multivariate_normal(mean=[0, 0], cov=rho_real)
+    copula_ll_real = copula_density.logpdf(z_real_sub).mean()
+    copula_ll_fake = copula_density.logpdf(z_fake_sub).mean()
+    copula_ll_gap  = copula_ll_real - copula_ll_fake  # lower = better
+
+    # --- Step 4: Tail dependence coefficients ---
+    # Upper tail: P(U1 > t | U2 > t) — days with high solar AND high wind
+    # Lower tail: P(U1 < t | U2 < t) — days with low solar AND low wind
+    def tail_dep(u, threshold=0.9, upper=True):
+        if upper:
+            mask = (u[:, 0] > threshold) & (u[:, 1] > threshold)
+            denom = (u[:, 1] > threshold).sum()
+        else:
+            mask = (u[:, 0] < 1-threshold) & (u[:, 1] < 1-threshold)
+            denom = (u[:, 1] < 1-threshold).sum()
+        return mask.sum() / denom if denom > 0 else 0.0
+
+    upper_real = tail_dep(u_real, upper=True)
+    upper_fake = tail_dep(u_fake, upper=True)
+    lower_real = tail_dep(u_real, upper=False)
+    lower_fake = tail_dep(u_fake, upper=False)
+
+    # --- Step 5: Cramér-von Mises stat on copula space ---
+    # Measures distance between copula distributions directly
+    def cvm_distance(u1, u2, n_bins=20):
+        """Bin both into a 2D grid and compute L2 distance of densities."""
+        h1, _, _ = np.histogram2d(u1[:,0], u1[:,1], bins=n_bins, range=[[0,1],[0,1]], density=True)
+        h2, _, _ = np.histogram2d(u2[:,0], u2[:,1], bins=n_bins, range=[[0,1],[0,1]], density=True)
+        return float(np.sqrt(((h1 - h2)**2).mean()))
+
+    copula_cvm = cvm_distance(u_real, u_fake)
+
+    # --- Log to wandb ---
+    prefix = f"copula_{season_tag}"   # e.g. "copula_DJF", "copula_all"
+
+    wandb.log({
+        f"{prefix}_ll_real":  copula_ll_real,
+        f"{prefix}_ll_fake":  copula_ll_fake,
+        f"{prefix}_ll_gap":   copula_ll_gap,
+        f"{prefix}_rho_real":       copula_rho_real,
+        f"{prefix}_rho_fake":       copula_rho_fake,
+        f"{prefix}_rho_delta":      abs(copula_rho_real - copula_rho_fake),
+        f"{prefix}_upper_tail_real": float(upper_real),
+        f"{prefix}_upper_tail_fake": float(upper_fake),
+        f"{prefix}_lower_tail_real": float(lower_real),
+        f"{prefix}_lower_tail_fake": float(lower_fake),
+        f"{prefix}_cvm_distance":   copula_cvm,
+        "layer_num":                layer_num,
+    })
+
+    return {
+        "copula_ll_real": copula_ll_real,
+        "copula_ll_fake": copula_ll_fake,
+        "copula_ll_gap":  copula_ll_gap,
+        "copula_rho_real": copula_rho_real,
+        "copula_rho_fake": copula_rho_fake,
+        "upper_tail_real": float(upper_real),
+        "upper_tail_fake": float(upper_fake),
+        "lower_tail_real": float(lower_real),
+        "lower_tail_fake": float(lower_fake),
+        "copula_cvm":      copula_cvm,
+    }
+
+def fit_and_compare_copula_seasonal(real_imgs, fake_imgs, solar_np, wind_np, 
+                                     splits, times, stats, layer_num, device):
+    """
+    Runs fit_and_compare_copula separately per season.
+    Uses the same test indices your splits already define.
+    real_imgs / fake_imgs: (B, 2, H, W) CPU tensors
+    """
+    import pandas as pd
+
+    # --- build index → season lookup from times ---
+    df = pd.DataFrame({
+        "idx":  range(len(times)),
+        "time": pd.to_datetime(times),
+    })
+    df["month"]  = df["time"].dt.month
+    df["season"] = df["month"].apply(lambda m:
+        "DJF" if m in [12, 1, 2] else
+        "MAM" if m in [3,  4, 5] else
+        "JJA" if m in [6,  7, 8] else "SON")
+
+    test_set    = set(splits["test"])
+    test_indices = splits["test"]  # preserves the exact order the dataloader used
+
+    # map each test index → season
+    idx_to_season = dict(zip(df["idx"], df["season"]))
+    test_seasons  = [idx_to_season[i] for i in test_indices]
+
+    season_results = {}
+
+    for season in ["DJF", "MAM", "JJA", "SON"]:
+        # boolean mask over the test batch rows
+        mask = torch.tensor([s == season for s in test_seasons])
+
+        if mask.sum() < 10:
+            print(f"  Skipping {season} — only {mask.sum()} samples")
+            continue
+
+        real_season = real_imgs[mask]
+        fake_season = fake_imgs[mask]
+
+        print(f"  {season}: {mask.sum()} test samples")
+
+        # reuse your existing function, just pass season-filtered tensors
+        metrics = fit_and_compare_copula(real_season, fake_season, 
+                                          layer_num, season_tag=season)
+        season_results[season] = metrics
+
+    # --- summary plot: rho and tail dependence across seasons ---
+    plot_seasonal_copula_summary(season_results, layer_num)
+
+    return season_results
+
+def plot_seasonal_copula_summary(season_results, layer_num):
+    """
+    2-panel plot:
+      Left:  copula rho (real vs fake) per season
+      Right: upper + lower tail dependence per season
+    """
+    seasons = list(season_results.keys())
+    x = np.arange(len(seasons))
+    width = 0.35
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"Seasonal Copula Comparison — Stage {layer_num}", fontsize=13)
+
+    # --- Panel 1: copula rho ---
+    rho_real = [season_results[s]["copula_rho_real"] for s in seasons]
+    rho_fake = [season_results[s]["copula_rho_fake"] for s in seasons]
+
+    axes[0].bar(x - width/2, rho_real, width, label="Real", color="steelblue")
+    axes[0].bar(x + width/2, rho_fake, width, label="Fake", color="tomato")
+    axes[0].axhline(0, color="black", linewidth=0.8, linestyle="--")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(seasons)
+    axes[0].set_ylabel("Copula ρ (solar–wind dependency)")
+    axes[0].set_title("Dependency Structure per Season")
+    axes[0].legend()
+    axes[0].set_ylim(-1, 1)
+
+    # annotate delta
+    for i, s in enumerate(seasons):
+        delta = abs(rho_real[i] - rho_fake[i])
+        axes[0].text(i, max(rho_real[i], rho_fake[i]) + 0.03,
+                     f"Δ={delta:.2f}", ha="center", fontsize=8, color="dimgray")
+
+    # --- Panel 2: tail dependence ---
+    upper_real = [season_results[s]["upper_tail_real"] for s in seasons]
+    upper_fake = [season_results[s]["upper_tail_fake"] for s in seasons]
+    lower_real = [season_results[s]["lower_tail_real"] for s in seasons]
+    lower_fake = [season_results[s]["lower_tail_fake"] for s in seasons]
+
+    axes[1].plot(seasons, upper_real, "o-",  color="steelblue", label="Upper real")
+    axes[1].plot(seasons, upper_fake, "o--", color="steelblue", label="Upper fake", alpha=0.6)
+    axes[1].plot(seasons, lower_real, "s-",  color="tomato",    label="Lower real")
+    axes[1].plot(seasons, lower_fake, "s--", color="tomato",    label="Lower fake", alpha=0.6)
+    axes[1].set_ylabel("Tail dependence coefficient")
+    axes[1].set_title("Tail Dependence per Season\n(upper = high solar+wind, lower = low both)")
+    axes[1].legend(fontsize=8)
+    axes[1].set_ylim(0, 1)
+
+    plt.tight_layout()
+    path = f"Resources/samples/copula_seasonal_stage{layer_num}.png"
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+    wandb.log({f"copula_seasonal_stage{layer_num}": wandb.Image(path, caption=
+        "Left: copula rho per season — real vs fake should match. "
+        "Right: tail dependence — upper=high solar+wind simultaneously, "
+        "lower=low both. DJF expected negative rho (wind↑ sun↓), "
+        "JJA expected near-zero or positive.")})
+
+def plot_copula_kde_full(real_imgs, fake_imgs, stats, layer_num):
+    import numpy as np
+    from scipy.stats import gaussian_kde, norm
+    from scipy.stats import multivariate_normal
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    def denorm(x, vmin, vmax):
+        return (x + 1) / 2 * (vmax - vmin) + vmin
+
+    real_solar_map = denorm(real_imgs[:, 0], stats["solarMin"], stats["solarMax"])
+    real_wind_map  = denorm(real_imgs[:, 1], stats["windMin"],  stats["windMax"])
+    fake_solar_map = denorm(fake_imgs[:, 0], stats["solarMin"], stats["solarMax"])
+    fake_wind_map  = denorm(fake_imgs[:, 1], stats["windMin"],  stats["windMax"])
+
+    cy, cx = 60, 100
+    r = 2
+
+    def patch_mean(maps, cy, cx, r):
+        return maps[:, cy-r:cy+r+1, cx-r:cx+r+1].mean(dim=(1,2)).numpy()
+
+    # --- extract paired scalars ---
+    real_s  = patch_mean(real_solar_map, cy, cx, r)
+    real_w  = patch_mean(real_wind_map,  cy, cx, r)
+    fake_s  = patch_mean(fake_solar_map, cy, cx, r)
+    fake_w  = patch_mean(fake_wind_map,  cy, cx, r)
+
+    # cx_west, cx_east = 75, 125
+    # real_sA = patch_mean(real_solar_map, cy, cx_west, r)
+    # real_sB = patch_mean(real_solar_map, cy, cx_east, r)
+    # fake_sA = patch_mean(fake_solar_map, cy, cx_west, r)
+    # fake_sB = patch_mean(fake_solar_map, cy, cx_east, r)
+    real_sA = real_solar_map[:, :, :67].mean(dim=(1,2)).numpy()      # west lon
+    real_sB = real_solar_map[:, :, 134:].mean(dim=(1,2)).numpy()     # east lon
+    fake_sA = fake_solar_map[:, :, :67].mean(dim=(1,2)).numpy()
+    fake_sB = fake_solar_map[:, :, 134:].mean(dim=(1,2)).numpy()
+
+    # -------------------------------------------------------------------
+    # Gaussian copula sampler
+    # fits a copula to (xA, xB) and returns n_samples new paired samples
+    # mapped back to the original marginal distributions via ECDF inversion
+    # -------------------------------------------------------------------
+    def sample_gaussian_copula(xA, xB, n_samples):
+        n = len(xA)
+        eps = 1e-6
+
+        # Step 1: PIT → uniform
+        uA = rankdata(xA) / (n + 1)
+        uB = rankdata(xB) / (n + 1)
+
+        # Step 2: uniform → normal (Gaussian copula space)
+        zA = norm.ppf(np.clip(uA, eps, 1 - eps))
+        zB = norm.ppf(np.clip(uB, eps, 1 - eps))
+
+        # Step 3: fit correlation
+        rho = np.corrcoef(zA, zB)[0, 1]
+        cov = np.array([[1, rho], [rho, 1]])
+
+        # Step 4: sample from fitted bivariate normal
+        z_samples = multivariate_normal(mean=[0, 0], cov=cov).rvs(n_samples)
+        u_samples = norm.cdf(z_samples)  # back to uniform space
+
+        # Step 5: invert empirical marginals (quantile mapping back to original scale)
+        # for each sampled uniform value, find the closest real data quantile
+        def invert_ecdf(u_new, x_ref):
+            quantiles = np.sort(x_ref)
+            indices = (u_new * len(quantiles)).astype(int).clip(0, len(quantiles) - 1)
+            return quantiles[indices]
+
+        sA_copula = invert_ecdf(u_samples[:, 0], xA)
+        sB_copula = invert_ecdf(u_samples[:, 1], xB)
+
+        return sA_copula, sB_copula
+
+    n_samples = len(real_s)
+
+    # Panel 1: copula samples for (solar, wind)
+    cop_s, cop_w = sample_gaussian_copula(real_s, real_w, n_samples)
+
+    # Panel 2: copula samples for (solar_west, solar_east)
+    cop_sA, cop_sB = sample_gaussian_copula(real_sA, real_sB, n_samples)
+
+    # -------------------------------------------------------------------
+    # KDE helper — now takes 3 datasets
+    # -------------------------------------------------------------------
+    def make_kde_grid_3(xA, yA, xB, yB, xC, yC, n=80j):
+        x_min = min(xA.min(), xB.min(), xC.min())
+        x_max = max(xA.max(), xB.max(), xC.max())
+        y_min = min(yA.min(), yB.min(), yC.min())
+        y_max = max(yA.max(), yB.max(), yC.max())
+        xx, yy = np.mgrid[x_min:x_max:n, y_min:y_max:n]
+        pos = np.vstack([xx.ravel(), yy.ravel()])
+        zz_A = gaussian_kde(np.vstack([xA, yA]))(pos).reshape(xx.shape)
+        zz_B = gaussian_kde(np.vstack([xB, yB]))(pos).reshape(xx.shape)
+        zz_C = gaussian_kde(np.vstack([xC, yC]))(pos).reshape(xx.shape)
+        return xx, yy, zz_A, zz_B, zz_C
+
+    # -------------------------------------------------------------------
+    # Plot
+    # -------------------------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle(f"Copula Dependency Analysis — Stage {layer_num}", fontsize=13)
+
+    # --- Panel 1: cross-variable ---
+    xx, yy, zz_real, zz_fake, zz_cop = make_kde_grid_3(
+        real_s, real_w, fake_s, fake_w, cop_s, cop_w
     )
-})
+    rho_real = np.corrcoef(real_s,  real_w)[0, 1]
+    rho_fake = np.corrcoef(fake_s,  fake_w)[0, 1]
+    rho_cop  = np.corrcoef(cop_s,   cop_w)[0, 1]
 
+    axes[0].contourf(xx, yy, zz_real, levels=6, cmap="Blues",   alpha=0.7)
+    axes[0].contour( xx, yy, zz_fake, levels=6, colors="purple", linewidths=1.2)
+    axes[0].contour( xx, yy, zz_cop,  levels=6, colors="green",  linewidths=1.2,
+                     linestyles="dashed")
+    axes[0].set_title(f"Cross-Variable Dependence\n"
+                      f"Real ρ={rho_real:.2f} | StyleGAN ρ={rho_fake:.2f} | "
+                      f"Copula ρ={rho_cop:.2f}")
+    axes[0].set_xlabel("Solar Energy Potential (patch mean)")
+    axes[0].set_ylabel("Wind Energy Potential (patch mean)")
 
+    # --- Panel 2: spatial ---
+    xx, yy, zz_real, zz_fake, zz_cop = make_kde_grid_3(
+        real_sA, real_sB, fake_sA, fake_sB, cop_sA, cop_sB
+    )
+    rho_real_sp = np.corrcoef(real_sA, real_sB)[0, 1]
+    rho_fake_sp = np.corrcoef(fake_sA, fake_sB)[0, 1]
+    rho_cop_sp  = np.corrcoef(cop_sA,  cop_sB)[0, 1]
+
+    axes[1].contourf(xx, yy, zz_real, levels=6, cmap="Blues",   alpha=0.7)
+    axes[1].contour( xx, yy, zz_fake, levels=6, colors="purple", linewidths=1.2)
+    axes[1].contour( xx, yy, zz_cop,  levels=6, colors="green",  linewidths=1.2,
+                     linestyles="dashed")
+    axes[1].set_title(f"Spatial Dependence (West vs East Solar)\n"
+                      f"Real ρ={rho_real_sp:.2f} | StyleGAN ρ={rho_fake_sp:.2f} | "
+                      f"Copula ρ={rho_cop_sp:.2f}")
+    axes[1].set_xlabel("Solar — West Belgium (patch mean)")
+    axes[1].set_ylabel("Solar — East Belgium (patch mean)")
+
+    # --- legend ---
+    fig.legend(handles=[
+        Patch(facecolor="steelblue", alpha=0.7, label="Real Data"),
+        Line2D([0],[0], color="purple", linewidth=1.5, label="StyleGAN Generated"),
+        Line2D([0],[0], color="green",  linewidth=1.5, label="Gaussian Copula",
+               linestyle="dashed"),
+    ], loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.04))
+
+    plt.tight_layout()
+    path = f"Resources/samples/copula_kde_full_stage{layer_num}.png"
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    wandb.log({f"copula_kde_full_stage{layer_num}": wandb.Image(path)})
+
+def plot_copula_scatter(real_imgs, fake_imgs, stats, layer_num):
+    """Scatter in copula (uniform) space — shows dependency structure directly."""
+    from scipy.stats import rankdata
+
+    B, C, H, W = real_imgs.shape
+    real_flat = real_imgs.permute(0,2,3,1).reshape(-1, 2).numpy()
+    fake_flat = fake_imgs.permute(0,2,3,1).reshape(-1, 2).numpy()
+
+    # subsample for speed
+    idx = np.random.choice(len(real_flat), size=min(5000, len(real_flat)), replace=False)
+    real_s = real_flat[idx]
+    fake_s = fake_flat[idx]
+
+    def to_u(x):
+        u = np.zeros_like(x)
+        for c in range(x.shape[1]):
+            u[:, c] = rankdata(x[:, c]) / (len(x[:, c]) + 1)
+        return u
+
+    u_real = to_u(real_s)
+    u_fake = to_u(fake_s)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].scatter(u_real[:, 0], u_real[:, 1], s=1, alpha=0.3, c='steelblue')
+    axes[0].set_title("Real — Copula Space")
+    axes[0].set_xlabel("Solar (uniform)")
+    axes[0].set_ylabel("Wind (uniform)")
+
+    axes[1].scatter(u_fake[:, 0], u_fake[:, 1], s=1, alpha=0.3, c='tomato')
+    axes[1].set_title("Fake — Copula Space")
+    axes[1].set_xlabel("Solar (uniform)")
+    axes[1].set_ylabel("Wind (uniform)")
+
+    plt.tight_layout()
+    path = f"Resources/samples/copula_scatter_stage{layer_num}.png"
+    plt.savefig(path, dpi=150)
+    plt.close()
+    wandb.log({f"copula_scatter_stage{layer_num}": wandb.Image(path)})
+
+def plot_spatial_correlation_decay(real_imgs, fake_imgs, stats, layer_num):
+    """
+    Computes solar-solar correlation between center pixel and pixels at 
+    increasing distances. Shows whether StyleGAN learned realistic spatial 
+    coherence length.
+    """
+    def denorm(x, vmin, vmax):
+        return (x + 1) / 2 * (vmax - vmin) + vmin
+
+    real_solar = denorm(real_imgs[:, 0], stats["solarMin"], stats["solarMax"])  # (B,H,W)
+    fake_solar = denorm(fake_imgs[:, 0], stats["solarMin"], stats["solarMax"])
+
+    # center pixel of your 121x201 grid
+    cy, cx = 60, 100
+
+    distances = [1, 2, 5, 10, 20, 35, 50, 75, 100]
+    rho_real_list = []
+    rho_fake_list = []
+
+    center_real = real_solar[:, cy, cx].numpy()
+    center_fake = fake_solar[:, cy, cx].numpy()
+
+    for d in distances:
+        # move east along longitude axis, clamp to grid edge
+        col = min(cx + d, real_solar.shape[2] - 1)
+
+        neighbor_real = real_solar[:, cy, col].numpy()
+        neighbor_fake = fake_solar[:, cy, col].numpy()
+
+        rho_real_list.append(np.corrcoef(center_real, neighbor_real)[0, 1])
+        rho_fake_list.append(np.corrcoef(center_fake, neighbor_fake)[0, 1])
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(distances, rho_real_list, "o-",  color="steelblue", label="Real", linewidth=2)
+    ax.plot(distances, rho_fake_list, "o--", color="tomato",    label="StyleGAN", linewidth=2)
+    ax.axhline(0, color="black", linewidth=0.8, linestyle=":")
+    ax.set_xlabel("Distance from center pixel (grid steps, ~5 km each)")
+    ax.set_ylabel("Pearson ρ")
+    ax.set_title(f"Spatial Correlation Decay — Solar — Stage {layer_num}\n"
+                 f"Real should decay smoothly; flat/slow fake = over-smoothed, "
+                 f"fast fake = spatially incoherent")
+    ax.legend()
+    ax.set_ylim(-0.1, 1.05)
+    ax.grid(True, alpha=0.3)
+
+    # annotate the characteristic length (where rho drops below 0.5)
+    for label, rho_list, color in [("Real", rho_real_list, "steelblue"), 
+                                    ("Fake", rho_fake_list, "tomato")]:
+        for i, r in enumerate(rho_list):
+            if r < 0.5:
+                ax.axvline(distances[i], color=color, linewidth=0.8, 
+                           linestyle="--", alpha=0.5)
+                ax.text(distances[i] + 1, 0.52, f"{label} ρ<0.5\nat d={distances[i]}", 
+                        color=color, fontsize=8)
+                break
+
+    plt.tight_layout()
+    path = f"Resources/samples/spatial_decay_stage{layer_num}.png"
+    plt.savefig(path, dpi=150)
+    plt.close()
+    wandb.log({f"spatial_decay_stage{layer_num}": wandb.Image(path)})
 
 # To get the params for the mapping network we look for parameters with "mapping" in the name
 def get_params_with_lr(model):
@@ -778,7 +1260,7 @@ def get_fixed_test_batch(dataset, indices, device):
 
 
 def evaluate_from_checkpoint(checkpoint_path, layer_num):
-    wandb.init(project="pggan-energy", name=f"eval_stage{layer_num}")
+    wandb.init(project="pggan-energy", name=f"copula_eval_stage{layer_num}")
 
     solarPaths, windPaths = pathsLists()
     stats  = torch.load(statsPath,  weights_only=False)
@@ -787,6 +1269,8 @@ def evaluate_from_checkpoint(checkpoint_path, layer_num):
     dsSolar = xr.open_mfdataset(solarPaths, combine="by_coords")
     dsWind  = xr.open_mfdataset(windPaths,  combine="by_coords")
     dsSolar, dsWind = xr.align(dsSolar, dsWind)
+
+    times = dsSolar["Solar Energy Potential"].time.values
 
     solar_np = dsSolar["Solar Energy Potential"].values
     wind_np  = dsWind["Wind Energy Potential"].values
@@ -819,6 +1303,28 @@ def evaluate_from_checkpoint(checkpoint_path, layer_num):
     plot_real_vs_fake(real_imgs.cpu(), fake_imgs, stats, layer_num)
     plot_histograms(real_imgs.cpu(), fake_imgs, stats, layer_num)
     plot_metrics_dashboard(real_imgs.cpu(), fake_imgs, stats, layer_num)
+    
+    copula_metrics = fit_and_compare_copula(real_imgs.cpu(), fake_imgs, 
+                                             layer_num, season_tag="all")
+    plot_copula_scatter(real_imgs.cpu(), fake_imgs, stats, layer_num)
+
+    seasonal_copula = fit_and_compare_copula_seasonal(
+        real_imgs.cpu(), fake_imgs,
+        solar_np, wind_np,
+        splits, times, stats,
+        layer_num, device
+    )
+
+    plot_copula_kde_full(real_imgs.cpu(), fake_imgs, stats, layer_num)
+    # --- optional: copula map generation ---
+    solar_cop, wind_cop = generate_copula_map(real_imgs.cpu(), stats, n_samples=4)
+    plot_spatial_correlation_decay(real_imgs.cpu(), fake_imgs, stats, layer_num)
+
+    for season, m in seasonal_copula.items():
+        print(f"{season} | rho real: {m['copula_rho_real']:+.3f}  "
+              f"fake: {m['copula_rho_fake']:+.3f}  "
+              f"Δ: {abs(m['copula_rho_real']-m['copula_rho_fake']):.3f}  "
+              f"CvM: {m['copula_cvm']:.4f}")
 
     wandb.finish()
 

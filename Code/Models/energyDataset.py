@@ -44,4 +44,4 @@ def get_dataloader(solar_np, wind_np, stats, splits, layer_num,
     indices = splits[split]
     subset  = Subset(dataset, indices)
     return DataLoader(subset, batch_size=batch_size,
-                      shuffle=(split == "train"), drop_last=True)
+                      shuffle=(split == "train"), drop_last=False)
