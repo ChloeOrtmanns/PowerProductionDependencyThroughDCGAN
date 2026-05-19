@@ -2,22 +2,22 @@ from pathlib import Path
 import torch
 from config import device
 
-def save_checkpoint(g, d, g_opt, d_opt, layer_num, filepath):
-    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+def save_checkpoint(g, d, g_optimizer, d_optimizer, g_running, layer_num, path):
     torch.save({
-        "layer_num": layer_num,
-        "g_state":   g.state_dict(),
-        "d_state":   d.state_dict(),
-        "g_opt":     g_opt.state_dict(),
-        "d_opt":     d_opt.state_dict(),
-    }, filepath)
-    print(f"Saved checkpoint → {filepath}")
+        "g":           g.state_dict(),
+        "d":           d.state_dict(),
+        "g_optimizer": g_optimizer.state_dict(),
+        "d_optimizer": d_optimizer.state_dict(),
+        "g_running":   g_running.state_dict(),
+        "layer_num":   layer_num,
+    }, path)
+    print(f"Saved checkpoint -> {path}")
 
-def load_checkpoint(filepath, g, d, g_opt, d_opt):
-    ckpt = torch.load(filepath, map_location=device)
-    g.load_state_dict(ckpt["g_state"])
-    d.load_state_dict(ckpt["d_state"])
-    g_opt.load_state_dict(ckpt["g_opt"])
-    d_opt.load_state_dict(ckpt["d_opt"])
-    print(f"Loaded checkpoint from {filepath} (layer {ckpt['layer_num']})")
-    return ckpt["layer_num"]
+def load_checkpoint(path, g, d, g_optimizer, d_optimizer, g_running=None):
+    ckpt = torch.load(path, weights_only=False)
+    g.load_state_dict(ckpt["g"])
+    d.load_state_dict(ckpt["d"])
+    g_optimizer.load_state_dict(ckpt["g_optimizer"])
+    d_optimizer.load_state_dict(ckpt["d_optimizer"])
+    if g_running is not None and "g_running" in ckpt:
+        g_running.load_state_dict(ckpt["g_running"])

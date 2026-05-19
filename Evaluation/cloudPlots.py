@@ -7,10 +7,7 @@ from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 from pathlib import Path
 
-def plot_kde_full(real_imgs, fake_imgs, stats, layer_num):
-    typeSize = "small"
-    # typeSize = "all"
-
+def plot_kde_full(real_imgs, fake_imgs, stats, layer_num, typeSize):
     """denorm(): Reverses the [-1, 1] normalization back to original physical units (e.g. W/m²).
 	:param x:		value of a channel of the image tensor
 	:param vmin:	total minimum value over the dataset
