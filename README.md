@@ -15,27 +15,27 @@ The trainingloop can be found in **Main.py**. It implements an early stop and yo
 Everything is also being logged to wandb which you should configure yourself.
 
 ## Plots and Evaluation
-In the *Evaluation/* folder, you can find many different mathematical metrics to evaluate whether the StyleGAN model was doing good in general. *Evaluation/***mainEvaluation.py** can run and will automatically log to wandb if configured right.
+In the *Evaluation/* folder, you can find many different mathematical metrics to evaluate whether the StyleGAN model was doing good in general. The **mainEvaluation.py** file can run and will automatically log to wandb if configured right.
 
 In the *StandalonePlots/* you can find a few seperate plotting files.
-- *StandalonePlots/***lowerTailResearch.py** plots the histograms and scatterplots of the chosen test batch, gan generated data and copula data. Though this code is mainly based on the PCA copula, I assume with a bit of tweaking you can use it for other copula generated data.
-- *StandalonePlots/***PixelCopulaGANKDE.py** plots the KDE of a single pixel in the test data, GAN generated data and t-copula/copula fitted data on that pixel. You can comment out which copula you want, but as the parameters of freedom are high enough in this case, the t-copula automatically reverts to a copula anyway.
-- *StandalonePlots/***spatialMapCorrCopulaGan.py** goes past every X pixels on the map, averages the data (test, GAN, t-copula) over that pixels and plots the spatial correlation for each. In the last two plots, it calculates the difference between that corelation of real-GAN and real-Copula.
+- **lowerTailResearch.py** plots the histograms and scatterplots of the chosen test batch, gan generated data and copula data. Though this code is mainly based on the PCA copula, I assume with a bit of tweaking you can use it for other copula generated data.
+- **PixelCopulaGANKDE.py** plots the KDE of a single pixel in the test data, GAN generated data and t-copula/copula fitted data on that pixel. You can comment out which copula you want, but as the parameters of freedom are high enough in this case, the t-copula automatically reverts to a copula anyway.
+- **spatialMapCorrCopulaGan.py** goes past every X pixels on the map, averages the data (test, GAN, t-copula) over that pixels and plots the spatial correlation for each. In the last two plots, it calculates the difference between that corelation of real-GAN and real-Copula.
 
 # Copula generated data
 ## Coarsed Copula
 The only way to approach my resolution is by lowering the resolution and performing copula functions on a smaller spatial grid instead of all the pixels spatially. These files can be found in the *CoarsedCopula/* folder.
 
-- *CoarsedCopula/***coarsedCopulaGenerator.py** generates these data points. 
-- *CoarsedCopula/***coarsedCopulaMap.py** maps them in the lower resolution.
+- **coarsedCopulaGenerator.py** generates these data points. 
+- **coarsedCopulaMap.py** maps them in the lower resolution.
 
 ## PCA Copula
 Another way to retain the spatial dependency while performing a copula on my data is by implementing PCA. These files can be found in the *PCAcopulas/* folder.
 
-- *PCAcopulas/***PCAcopulaGenerator.py** generates the PCA components and the data.
-- *PCAcopulas/***inspectPCA.py** maps what these components are so you can understand what they actually mean
-- *PCAcopulas/***PCAcopulaKDE** maps the real test batch data, GAN generated data and PCA-Copula generated data and plots them in a KDE plot. It shows you three different images, A is a KDE in the PCA latent space, B is just pixel-histogram per regio, C is a KDE in the native space of the values.
-- *PCAcopulas/***PCAcopulaMeanMapPlot.py** plots the averaged real test data, GAN generated data and PCA-Copula generated data, and also plots the difference between real-GAN and real-Copula.
+- **PCAcopulaGenerator.py** generates the PCA components and the data.
+- **inspectPCA.py** maps what these components are so you can understand what they actually mean
+- **PCAcopulaKDE** maps the real test batch data, GAN generated data and PCA-Copula generated data and plots them in a KDE plot. It shows you three different images, A is a KDE in the PCA latent space, B is just pixel-histogram per regio, C is a KDE in the native space of the values.
+- **PCAcopulaMeanMapPlot.py** plots the averaged real test data, GAN generated data and PCA-Copula generated data, and also plots the difference between real-GAN and real-Copula.
 
 # Resources
-Bunch of resources/data/checkpoints/... that I saved but not everything because some were too big for GitHub so they might be irrelevant to you.
+Bunch of resources, data, checkpoints, ... that I saved but not everything because some were too big for GitHub so they might be irrelevant to you.
