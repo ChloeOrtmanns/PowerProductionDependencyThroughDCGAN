@@ -1,7 +1,7 @@
-# ---RANDOM-NOTES--------------------------------------------------------------------------------------------------------------
-# Most of the code is based off https://ym2132.github.io/Progressive_GAN#the-gulrajani-generator-g-network
+"""
+Most of the code is based off https://ym2132.github.io/StyleGAN
+"""
 
-# ---IMPORTS-------------------------------------------------------------------------------------------------------------------
 from pathlib import Path
 import xarray as xr
 from tqdm import tqdm
@@ -29,7 +29,6 @@ from Checkpoints.checkpointUtils import save_checkpoint, load_checkpoint
 from Models.generator import Generator
 from Models.discriminator import Discriminator
 from Models.energyDataset import EnergyDataset, get_dataloader
-from Models.copulaMapGen import generate_copula_map
 from Evaluation.metrics import evaluate_metrics
 from Evaluation.earlyStop import early_stop_metric
 

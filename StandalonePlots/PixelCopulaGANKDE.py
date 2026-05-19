@@ -13,29 +13,59 @@ from config import STATS_PATH, SPLITS_PATH, PATHS_PATH, device, STAGE_SIZES
 from Models.generator import Generator
 
 # --- settings ---
-PIXEL      = (60, 100)          # (row, col) — centre pixel
+PIXEL      = (10, 180)          # (row, col) — centre pixel
 CHECKPOINT = Path("Resources/FakeData/20260506 - 90/stage6.pt")
 LAYER_NUM  = 6
 STATS_PATH = Path("Resources/FakeData/20260506 - 90/stats_90.pt")
 SPLITS_PATH = Path("Resources/FakeData/20260506 - 90/splits_90.pt")
 
-# --- load real data ---
-solar_test  = np.load("Resources/FakeData/20260506 - 90/solar_test.npy")    # (M, 121, 201)
-wind_test   = np.load("Resources/FakeData/20260506 - 90/wind_test.npy")
-solar_train = np.load("Resources/FakeData/20260506 - 90/solar_synthetic.npy")
-wind_train  = np.load("Resources/FakeData/20260506 - 90/wind_synthetic.npy")
-
-# --- extract lon/lat from original NetCDF files ---
+# --- extract lon/lat from original NetCDF files and get real data
 paths = torch.load(PATHS_PATH, weights_only=False)
-ds = xr.open_mfdataset(paths["solarPaths"], combine="by_coords")
+
+"""Load raw NetCDF files, align, and drop low-production days."""
+solar_paths, wind_paths = paths["solarPaths"], paths["windPaths"]
+    
+ds_solar = xr.open_mfdataset(solar_paths, combine="by_coords")
+ds_wind  = xr.open_mfdataset(wind_paths,  combine="by_coords")
+ds_solar, ds_wind = xr.align(ds_solar, ds_wind)
+        
+solar_np = ds_solar["Solar Energy Potential"].values   # (T, 121, 201)
+wind_np  = ds_wind["Wind Energy Potential"].values     # (T, 121, 201)
+times    = ds_solar["Solar Energy Potential"].time.values
+                            
+total_cells      = 121 * 201
+zero_solar       = (solar_np == 0).sum(axis=(1, 2))
+zero_wind        = (wind_np  == 0).sum(axis=(1, 2))
+solar_zero_mask  = (zero_solar / total_cells <= 0.9)
+wind_zero_mask   = (zero_wind  / total_cells <= 0.9)
+valid_mask       = solar_zero_mask & wind_zero_mask
+                    
+solar_np = solar_np[valid_mask]
+wind_np  = wind_np[valid_mask]
+times    = times[valid_mask]
+
 try:
-    lat = ds["Solar Energy Potential"].coords["latitude"].values   # (121,)
-    lon = ds["Solar Energy Potential"].coords["longitude"].values  # (201,)
+    lat = ds_solar["Solar Energy Potential"].coords["latitude"].values   # (121,)
+    lon = ds_solar["Solar Energy Potential"].coords["longitude"].values  # (201,)
 except KeyError:
     # fallback: try short names
-    lat = ds["Solar Energy Potential"].coords["lat"].values
-    lon = ds["Solar Energy Potential"].coords["lon"].values
-ds.close()
+    lat = ds_solar["Solar Energy Potential"].coords["lat"].values
+    lon = ds_solar["Solar Energy Potential"].coords["lon"].values
+                                
+ds_solar.close()
+ds_wind.close()
+                                        
+print(f"[Copula] Days after filtering: {len(solar_np)}")
+
+splits = torch.load(SPLITS_PATH, weights_only=False)
+
+train_idx = splits["train"]
+test_idx  = splits["test"]
+
+solar_train = solar_np[train_idx]
+wind_train  = wind_np[train_idx]
+solar_test  = solar_np[test_idx]
+wind_test   = wind_np[test_idx]
 
 # --- extract pixel time series ---
 r, c = PIXEL
@@ -179,6 +209,6 @@ ax_kde.legend(handles=[
 ])
 
 plt.tight_layout()
-plt.savefig("Resources/FakeData/20260506 - 90/pixel_tcopula_kde_60_100.png", dpi=150)
+plt.savefig("Resources/FakeData/20260506 - 90/pixel_tcopula_kde_60_100_right.png", dpi=150)
 plt.close()
 print("Saved pixel_tcopula_kde.png")

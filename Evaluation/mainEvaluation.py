@@ -1,3 +1,7 @@
+"""
+Runs some of the python files in Evaluation/ and logs then to wandb. Can be tweaked by commenting certain functions.
+"""
+
 from pathlib import Path
 import torch
 import xarray as xr
@@ -103,11 +107,11 @@ def evaluate_from_checkpoint(checkpoint_path, layer_num):
         "metrics_dashboard": wandb.Image(pathMetrics, caption=
             f"Stage {layer_num} | Wasserstein: lower=better | "
             f"Autocorr: fake should match real | Solar-Wind corr: real≈-0.5 physically expected"),
-    #     f"hist_stage{layer_num}": wandb.Image(pathHist, caption=
-    #         f"Stage {layer_num} | Pixel value distributions in [-1,1] | "
-    #         f"Fake should match Real shape"),
-    #     f"copula_kde_full_stage{layer_num}_all":   wandb.Image(pathCloudAll,   caption="KDE of all pixels"),
-    #     f"copula_kde_full_stage{layer_num}_small": wandb.Image(pathCloudSmall, caption="KDE of 5x5 pixels"),
+        f"hist_stage{layer_num}": wandb.Image(pathHist, caption=
+            f"Stage {layer_num} | Pixel value distributions in [-1,1] | "
+            f"Fake should match Real shape"),
+        f"copula_kde_full_stage{layer_num}_all":   wandb.Image(pathCloudAll,   caption="KDE of all pixels"),
+        f"copula_kde_full_stage{layer_num}_small": wandb.Image(pathCloudSmall, caption="KDE of 5x5 pixels"),
     })
 
     wandb.finish()

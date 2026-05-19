@@ -1,3 +1,9 @@
+"""
+Plots the lower tail in Histogram and Scatterplot for easier research.
+Is made as a standalone python file and can run (technically) the coarsed Copula,
+however right now it's made to fit the PCA copula.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs

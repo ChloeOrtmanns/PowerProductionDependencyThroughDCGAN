@@ -1,3 +1,6 @@
+"""
+Outdated run of a simple Progressive GAN based on the tutorial: https://ym2132.github.io/Progressive_GAN#the-gulrajani-generator-g-network
+"""
 # Before we continue lets set our inputs and configure the device for our model code
 import torch
 import torchvision
