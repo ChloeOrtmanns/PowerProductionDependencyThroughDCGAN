@@ -138,7 +138,57 @@ def solarEnergyProduction(year):
     # ### saving files
     outputPath = Path("/mnt/mvbc-gan/Data/Power/Solar") / f"solar_{year}.nc"
     outputPath.parent.mkdir(parents=True, exist_ok=True)
-    solarEnergy.to_netcdf(outputPath)    
+    solarEnergy.to_netcdf(outputPath) 
+
+def analyseVariabilityBoxplot():
+    years = range(2006, 2026)
+    solar_all, wind_all = [], []
+
+    for year in years:
+        solar_all.append(getData(
+            f"Data/2006-2025/rsds/rsds_be-04_CNRM-CERFACS-CNRM-CM5_rcp45_r1i1p1_RMIB-UGent-ALARO-0_v1_day_{year}0101-{year}1231.nc",
+            "rsds"
+        ))
+        wind_all.append(processUasVasToWindspeed(year))
+
+    solar_cat = xr.concat(solar_all, dim="time")
+    wind_cat  = xr.concat(wind_all,  dim="time")
+
+    # Flatten lat/lon per day → shape (n_days, 121*201)
+    solar_flat = solar_cat.values.reshape(len(solar_cat.time), -1)
+    wind_flat  = wind_cat.values.reshape(len(wind_cat.time), -1)
+
+    wind_vals = wind_flat.ravel()
+
+    below_ci  = (wind_vals < 3.5)
+    partial   = (wind_vals >= 3.5) & (wind_vals <= 6)
+    partial2   = (wind_vals >= 6) & (wind_vals <= 13)
+    rated     = (wind_vals > 13)  & (wind_vals < 25)
+    cutout    = (wind_vals >= 25)
+
+    print(f"Below cut-in  (<3.5):    {below_ci.sum():,}")
+    print(f"Partial power (3.5–6):  {partial.sum():,}")
+    print(f"Partial power (6–13):  {partial2.sum():,}")
+    print(f"Rated power   (13–25):   {rated.sum():,}")
+    print(f"Cut-out       (>=25):    {cutout.sum():,}")
+
+    wind_filtered = wind_flat.ravel()
+    wind_filtered = wind_filtered[wind_filtered >= 3.5]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].hist(solar_flat.ravel(), bins=100, color="orange", edgecolor="none")
+    axes[0].set_title("Solar (rsds) — distribution of all values")
+    axes[0].set_xlabel("W/m²")
+    axes[0].set_ylabel("Count")
+
+    axes[1].hist(wind_filtered.ravel(), bins=100, color="steelblue", edgecolor="none")
+    axes[1].set_title("Windspeed — distribution of all values")
+    axes[1].set_xlabel("m/s")
+    axes[1].set_ylabel("Count")
+
+    plt.tight_layout()
+    plt.show()   
 
 def main():
     for year in range(2006,2026):
@@ -148,14 +198,7 @@ def main():
     # plot(xr.open_dataset("Data/Power/Solar/solar_2003.nc")["Solar Energy Potential"], 3)
     # plot(xr.open_dataset("Data/Power/Wind/wind_2003.nc")["Wind Energy Potential"], 3)
 
-
-
-    # plotTwo(xr.open_dataset("Data/Power/Solar/solar_2003.nc")["Solar Energy Potential"], xr.open_dataset("Data/Power/Wind/wind_2003.nc")["Wind Energy Potential"], 2)
-    
-
-
-    
-  
+    # plotTwo(xr.open_dataset("Data/Power/Solar/solar_2003.nc")["Solar Energy Potential"], xr.open_dataset("Data/Power/Wind/wind_2003.nc")["Wind Energy Potential"], 2)    
 
 if __name__ == "__main__":
     main()
