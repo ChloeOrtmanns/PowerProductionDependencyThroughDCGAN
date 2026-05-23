@@ -39,3 +39,10 @@ Another way to retain the spatial dependency while performing a copula on my dat
 
 # Resources
 Bunch of resources, data, checkpoints, ... that I saved but not everything because some were too big for GitHub so they might be irrelevant to you.
+
+# Other branches
+For the attentive readers, you will notice there are three other branches left.
+- **Main**: the first branch that has primitive versions of the processing files
+- **Discriminator**: the branch with my first attempt at a DCGAN
+- **Wasserstein**: the branch with the WGAN-GP attempt
+These are still here for reference, but they are not rightfully up to date. They also do not matter anymore since I changed my direction to StyleGAN anyway
